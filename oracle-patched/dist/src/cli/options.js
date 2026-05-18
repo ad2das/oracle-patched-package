@@ -1,0 +1,331 @@
+import { InvalidArgumentError } from "commander";
+import { parseDuration } from "../duration.js";
+import path from "node:path";
+import fg from "fast-glob";
+import { DEFAULT_MODEL, MODEL_CONFIGS } from "../oracle/config.js";
+export function collectPaths(value, previous = []) {
+    if (!value) {
+        return previous;
+    }
+    const nextValues = Array.isArray(value) ? value : [value];
+    return previous.concat(nextValues
+        .flatMap((entry) => entry.split(","))
+        .map((entry) => entry.trim())
+        .filter(Boolean));
+}
+/**
+ * Merge all path-like CLI inputs (file/include aliases) into a single list, preserving order.
+ */
+export function mergePathLikeOptions(file, include, filesAlias, pathAlias, pathsAlias) {
+    const withFile = collectPaths(file, []);
+    const withInclude = collectPaths(include, withFile);
+    const withFilesAlias = collectPaths(filesAlias, withInclude);
+    const withPathAlias = collectPaths(pathAlias, withFilesAlias);
+    return collectPaths(pathsAlias, withPathAlias);
+}
+export function dedupePathInputs(inputs, { cwd = process.cwd() } = {}) {
+    const deduped = [];
+    const duplicates = [];
+    const seen = new Set();
+    for (const entry of inputs ?? []) {
+        const raw = entry?.trim();
+        if (!raw)
+            continue;
+        let key = raw;
+        if (!raw.startsWith("!") && !fg.isDynamicPattern(raw)) {
+            const absolute = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
+            key = `path:${path.normalize(absolute)}`;
+        }
+        else {
+            key = `pattern:${raw}`;
+        }
+        if (seen.has(key)) {
+            duplicates.push(raw);
+            continue;
+        }
+        seen.add(key);
+        deduped.push(raw);
+    }
+    return { deduped, duplicates };
+}
+export function collectModelList(value, previous = []) {
+    if (!value) {
+        return previous;
+    }
+    const entries = value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+    return previous.concat(entries);
+}
+export function collectTextValues(value, previous = []) {
+    const trimmed = value.trim();
+    return trimmed ? previous.concat(trimmed) : previous;
+}
+export function parseFloatOption(value) {
+    const parsed = Number.parseFloat(value);
+    if (Number.isNaN(parsed)) {
+        throw new InvalidArgumentError("Value must be a number.");
+    }
+    return parsed;
+}
+export function parseIntOption(value) {
+    if (value == null) {
+        return undefined;
+    }
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isNaN(parsed)) {
+        throw new InvalidArgumentError("Value must be an integer.");
+    }
+    return parsed;
+}
+export function parseHeartbeatOption(value) {
+    if (value == null) {
+        return 30;
+    }
+    if (typeof value === "number") {
+        if (Number.isNaN(value) || value < 0) {
+            throw new InvalidArgumentError("Heartbeat interval must be zero or a positive number.");
+        }
+        return value;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (normalized.length === 0) {
+        return 30;
+    }
+    if (normalized === "false" || normalized === "off") {
+        return 0;
+    }
+    const parsed = Number.parseFloat(normalized);
+    if (Number.isNaN(parsed) || parsed < 0) {
+        throw new InvalidArgumentError("Heartbeat interval must be zero or a positive number.");
+    }
+    return parsed;
+}
+export function usesDefaultStatusFilters(cmd) {
+    const hoursSource = cmd.getOptionValueSource?.("hours") ?? "default";
+    const limitSource = cmd.getOptionValueSource?.("limit") ?? "default";
+    const allSource = cmd.getOptionValueSource?.("all") ?? "default";
+    return hoursSource === "default" && limitSource === "default" && allSource === "default";
+}
+export function resolvePreviewMode(value) {
+    if (typeof value === "string" && value.length > 0) {
+        return value;
+    }
+    if (value === true) {
+        return "summary";
+    }
+    return undefined;
+}
+export function parseSearchOption(value) {
+    const normalized = value.trim().toLowerCase();
+    if (["on", "true", "1", "yes"].includes(normalized)) {
+        return true;
+    }
+    if (["off", "false", "0", "no"].includes(normalized)) {
+        return false;
+    }
+    throw new InvalidArgumentError('Search mode must be "on" or "off".');
+}
+export function normalizeModelOption(value) {
+    return (value ?? "").trim();
+}
+export function normalizeBaseUrl(value) {
+    const trimmed = value?.trim();
+    return trimmed?.length ? trimmed : undefined;
+}
+export function parseTimeoutOption(value) {
+    if (value == null)
+        return undefined;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "auto")
+        return "auto";
+    if (/^[0-9]+(?:\.[0-9]+)?$/.test(normalized)) {
+        const parsed = Number.parseFloat(normalized);
+        if (parsed > 0) {
+            return parsed;
+        }
+    }
+    const parsedMs = parseDuration(normalized, Number.NaN);
+    if (!Number.isFinite(parsedMs) || parsedMs <= 0) {
+        throw new InvalidArgumentError('Timeout must be a positive number of seconds, a duration like "10m", or "auto".');
+    }
+    return parsedMs / 1000;
+}
+export function parseDurationOption(value, label) {
+    if (value == null)
+        return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) {
+        throw new InvalidArgumentError(`${label} must be a duration like 30m, 10s, 500ms, or 2h.`);
+    }
+    const parsed = parseDuration(trimmed, Number.NaN);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new InvalidArgumentError(`${label} must be a positive duration like 30m, 10s, 500ms, or 2h.`);
+    }
+    return parsed;
+}
+function isGeminiDeepThinkAlias(normalized) {
+    return ((normalized.includes("gemini") && normalized.includes("deep")) ||
+        normalized.includes("deep-think") ||
+        normalized.includes("deep_think") ||
+        normalized.includes("deepthink"));
+}
+export function resolveApiModel(modelValue) {
+    const normalized = normalizeModelOption(modelValue).toLowerCase();
+    if (normalized in MODEL_CONFIGS) {
+        return normalized;
+    }
+    if (normalized.includes("/")) {
+        return normalized;
+    }
+    if (normalized.includes("grok")) {
+        return "grok-4.1";
+    }
+    if (normalized.includes("claude") && normalized.includes("sonnet")) {
+        return "claude-4.6-sonnet";
+    }
+    if (normalized.includes("claude") && normalized.includes("opus")) {
+        return "claude-4.1-opus";
+    }
+    if (normalized.includes("5.5") && normalized.includes("pro")) {
+        return "gpt-5.5-pro";
+    }
+    if (normalized.includes("5.5")) {
+        return "gpt-5.5";
+    }
+    if (normalized.includes("5.4") && normalized.includes("pro")) {
+        return "gpt-5.4-pro";
+    }
+    if (normalized.includes("5.4")) {
+        return "gpt-5.4";
+    }
+    if (normalized === "claude" || normalized === "sonnet" || /(^|\b)sonnet(\b|$)/.test(normalized)) {
+        return "claude-4.6-sonnet";
+    }
+    if (normalized === "opus" || normalized === "claude-4.1") {
+        return "claude-4.1-opus";
+    }
+    if (normalized.includes("5.0") || normalized === "gpt-5-pro" || normalized === "gpt-5") {
+        return "gpt-5-pro";
+    }
+    if (normalized.includes("5-pro") && !normalized.includes("5.1")) {
+        return "gpt-5-pro";
+    }
+    if (normalized.includes("5.2") && normalized.includes("pro")) {
+        return "gpt-5.2-pro";
+    }
+    if (normalized.includes("5.1") && normalized.includes("pro")) {
+        return "gpt-5.1-pro";
+    }
+    if (normalized.includes("codex")) {
+        if (normalized.includes("max")) {
+            throw new InvalidArgumentError("gpt-5.1-codex-max is not available yet. OpenAI has not released the API.");
+        }
+        return "gpt-5.1-codex";
+    }
+    if (isGeminiDeepThinkAlias(normalized)) {
+        throw new InvalidArgumentError("Gemini Deep Think is browser-only today. Use --engine browser --model gemini-3-deep-think.");
+    }
+    if (normalized.includes("gemini")) {
+        if (normalized.includes("3.1") || normalized.includes("3_1")) {
+            return "gemini-3.1-pro";
+        }
+        return "gemini-3-pro";
+    }
+    if (normalized.includes("pro")) {
+        return DEFAULT_MODEL;
+    }
+    // Passthrough for custom/OpenRouter model IDs.
+    return normalized;
+}
+export function inferModelFromLabel(modelValue) {
+    const normalized = normalizeModelOption(modelValue).toLowerCase();
+    if (!normalized) {
+        return DEFAULT_MODEL;
+    }
+    if (normalized in MODEL_CONFIGS) {
+        return normalized;
+    }
+    if (normalized.includes("/")) {
+        return normalized;
+    }
+    if (normalized.includes("grok")) {
+        return "grok-4.1";
+    }
+    if (normalized.includes("claude") && normalized.includes("sonnet")) {
+        return "claude-4.6-sonnet";
+    }
+    if (normalized.includes("claude") && normalized.includes("opus")) {
+        return "claude-4.1-opus";
+    }
+    if (normalized.includes("codex")) {
+        return "gpt-5.1-codex";
+    }
+    if (isGeminiDeepThinkAlias(normalized)) {
+        return "gemini-3-pro-deep-think";
+    }
+    if (normalized.includes("gemini")) {
+        if (normalized.includes("3.1") || normalized.includes("3_1")) {
+            return "gemini-3.1-pro";
+        }
+        return "gemini-3-pro";
+    }
+    if (normalized.includes("classic")) {
+        return "gpt-5-pro";
+    }
+    if (normalized.includes("thinking") && normalized.includes("heavy")) {
+        return "gpt-5.5";
+    }
+    if ((normalized.includes("5.5") || normalized.includes("5_5")) && normalized.includes("pro")) {
+        return "gpt-5.5-pro";
+    }
+    if (normalized.includes("5.5") || normalized.includes("5_5")) {
+        return "gpt-5.5";
+    }
+    if ((normalized.includes("5.4") || normalized.includes("5_4")) && normalized.includes("pro")) {
+        return "gpt-5.4-pro";
+    }
+    if (normalized.includes("5.4") || normalized.includes("5_4")) {
+        return "gpt-5.4";
+    }
+    if ((normalized.includes("5.2") || normalized.includes("5_2")) && normalized.includes("pro")) {
+        return "gpt-5.2-pro";
+    }
+    // Browser-only: pass through 5.2 thinking/instant variants for browser label mapping
+    if ((normalized.includes("5.2") || normalized.includes("5_2")) &&
+        normalized.includes("thinking")) {
+        return "gpt-5.2-thinking";
+    }
+    if ((normalized.includes("5.2") || normalized.includes("5_2")) &&
+        normalized.includes("instant")) {
+        return "gpt-5.2-instant";
+    }
+    if (normalized.includes("5.0") || normalized.includes("5-pro")) {
+        return "gpt-5-pro";
+    }
+    if (normalized.includes("gpt-5") &&
+        normalized.includes("pro") &&
+        !normalized.includes("5.1") &&
+        !normalized.includes("5.2") &&
+        !normalized.includes("5.5") &&
+        !normalized.includes("5.4")) {
+        return "gpt-5-pro";
+    }
+    if ((normalized.includes("5.1") || normalized.includes("5_1")) && normalized.includes("pro")) {
+        return "gpt-5.1-pro";
+    }
+    if (normalized.includes("pro")) {
+        return DEFAULT_MODEL;
+    }
+    if (normalized.includes("5.1") || normalized.includes("5_1")) {
+        return "gpt-5.1";
+    }
+    if (normalized.includes("thinking")) {
+        return "gpt-5.2-thinking";
+    }
+    if (normalized.includes("instant") || normalized.includes("fast")) {
+        return "gpt-5.2-instant";
+    }
+    return "gpt-5.2";
+}

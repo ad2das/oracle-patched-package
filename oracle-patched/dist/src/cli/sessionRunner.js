@@ -1,0 +1,943 @@
+import kleur from "kleur";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { runOracle, OracleResponseError, OracleTransportError, extractResponseMetadata, asOracleUserError, extractTextOutput, classifyProviderFailure, } from "../oracle.js";
+import { ensureSessionArtifacts, runBrowserSessionExecution, } from "../browser/sessionRunner.js";
+import { renderMarkdownAnsi } from "./markdownRenderer.js";
+import { formatResponseMetadata, formatTransportMetadata } from "./sessionDisplay.js";
+import { markErrorLogged } from "./errorUtils.js";
+import { sendSessionNotification, deriveNotificationSettingsFromMetadata, } from "./notifier.js";
+import { sessionStore } from "../sessionStore.js";
+import { wait } from "../sessionManager.js";
+import { runMultiModelApiSession } from "../oracle/multiModelRunner.js";
+import { MODEL_CONFIGS, DEFAULT_SYSTEM_PROMPT } from "../oracle/config.js";
+import { isKnownModel } from "../oracle/modelResolver.js";
+import { resolveModelConfig } from "../oracle/modelResolver.js";
+import { buildPrompt, buildRequestBody } from "../oracle/request.js";
+import { estimateRequestTokens } from "../oracle/tokenEstimate.js";
+import { formatTokenEstimate, formatTokenValue } from "../oracle/runUtils.js";
+import { formatFinishLine } from "../oracle/finishLine.js";
+import { sanitizeOscProgress } from "./oscUtils.js";
+import { readFiles } from "../oracle/files.js";
+import { cwd as getCwd } from "node:process";
+import { resumeBrowserSession } from "../browser/reattach.js";
+import { hasRecoverableChatGptConversation } from "../browser/reattachability.js";
+import { estimateTokenCount } from "../browser/utils.js";
+import { formatElapsed } from "../oracle/format.js";
+const isTty = process.stdout.isTTY;
+const dim = (text) => (isTty ? kleur.dim(text) : text);
+export async function performSessionRun({ sessionMeta, runOptions, mode, browserConfig, cwd, log, write, version, notifications, browserDeps, muteStdout = false, }) {
+    const writeInline = (chunk) => {
+        // Keep session logs intact while still echoing inline output to the user.
+        write(chunk);
+        return muteStdout ? true : process.stdout.write(chunk);
+    };
+    await sessionStore.updateSession(sessionMeta.id, {
+        status: "running",
+        startedAt: new Date().toISOString(),
+        mode,
+        ...(browserConfig ? { browser: { config: browserConfig } } : {}),
+    });
+    const notificationSettings = notifications ?? deriveNotificationSettingsFromMetadata(sessionMeta, process.env);
+    const modelForStatus = runOptions.model ?? sessionMeta.model;
+    try {
+        if (mode === "browser") {
+            if (!browserConfig) {
+                throw new Error("Missing browser configuration for session.");
+            }
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "running",
+                    startedAt: new Date().toISOString(),
+                });
+            }
+            const runnerDeps = {
+                ...browserDeps,
+                persistRuntimeHint: async (runtime) => {
+                    await sessionStore.updateSession(sessionMeta.id, {
+                        status: "running",
+                        browser: { config: browserConfig, runtime },
+                    });
+                },
+            };
+            const result = await runBrowserSessionExecution({
+                runOptions: { ...runOptions, sessionId: runOptions.sessionId ?? sessionMeta.id },
+                browserConfig,
+                cwd,
+                log,
+            }, runnerDeps);
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "completed",
+                    completedAt: new Date().toISOString(),
+                    usage: result.usage,
+                });
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: "completed",
+                completedAt: new Date().toISOString(),
+                usage: result.usage,
+                elapsedMs: result.elapsedMs,
+                errorMessage: undefined,
+                browser: {
+                    config: browserConfig,
+                    runtime: result.runtime,
+                    archive: result.archive,
+                    modelSelection: result.modelSelection,
+                    warnings: result.warnings,
+                },
+                artifacts: mergeArtifacts(sessionMeta.artifacts, result.artifacts),
+                response: undefined,
+                transport: undefined,
+                error: undefined,
+            });
+            await writeAssistantOutput(runOptions.writeOutputPath, result.answerText ?? "", log);
+            await sendSessionNotification({
+                sessionId: sessionMeta.id,
+                sessionName: sessionMeta.options?.slug ?? sessionMeta.id,
+                mode,
+                model: sessionMeta.model,
+                usage: result.usage,
+                characters: result.answerText?.length,
+            }, notificationSettings, log, result.answerText?.slice(0, 140));
+            return;
+        }
+        const multiModels = Array.isArray(runOptions.models) ? runOptions.models.filter(Boolean) : [];
+        if (multiModels.length > 1) {
+            const [primaryModel] = multiModels;
+            if (!primaryModel) {
+                throw new Error("Missing model name for multi-model run.");
+            }
+            const modelConfig = await resolveModelConfig(primaryModel, {
+                baseUrl: runOptions.baseUrl,
+                openRouterApiKey: process.env.OPENROUTER_API_KEY,
+            });
+            const files = await readFiles(runOptions.file ?? [], {
+                cwd,
+                maxFileSizeBytes: runOptions.maxFileSizeBytes,
+            });
+            const promptWithFiles = buildPrompt(runOptions.prompt, files, cwd);
+            const requestBody = buildRequestBody({
+                modelConfig,
+                systemPrompt: runOptions.system ?? DEFAULT_SYSTEM_PROMPT,
+                userPrompt: promptWithFiles,
+                searchEnabled: runOptions.search !== false,
+                maxOutputTokens: runOptions.maxOutput,
+                background: runOptions.background,
+                storeResponse: runOptions.background,
+            });
+            const estimatedTokens = estimateRequestTokens(requestBody, modelConfig);
+            const tokenLabel = formatTokenEstimate(estimatedTokens, (text) => isTty ? kleur.green(text) : text);
+            const filesPhrase = files.length === 0 ? "no files" : `${files.length} files`;
+            const modelsLabel = multiModels.join(", ");
+            log(`Calling ${isTty ? kleur.cyan(modelsLabel) : modelsLabel} — ${tokenLabel} tokens, ${filesPhrase}.`);
+            const multiRunTips = [];
+            if (files.length === 0) {
+                multiRunTips.push("Tip: no files attached — Oracle works best with project context. Add files via --file path/to/code or docs.");
+            }
+            const shortPrompt = (runOptions.prompt?.trim().length ?? 0) < 80;
+            if (shortPrompt) {
+                multiRunTips.push("Tip: brief prompts often yield generic answers — aim for 6–30 sentences and attach key files.");
+            }
+            for (const tip of multiRunTips) {
+                log(dim(tip));
+            }
+            // Surface long-running model expectations up front so users know why a response might lag.
+            const longRunningModels = multiModels.filter((model) => isKnownModel(model) && MODEL_CONFIGS[model]?.reasoning?.effort === "high");
+            if (longRunningModels.length > 0) {
+                for (const model of longRunningModels) {
+                    log("");
+                    const headingLabel = `[${model}]`;
+                    log(isTty ? kleur.bold(headingLabel) : headingLabel);
+                    log(dim("This model can take up to 60 minutes (usually replies much faster)."));
+                    log(dim("Press Ctrl+C to cancel."));
+                }
+            }
+            const shouldStreamInline = !muteStdout && process.stdout.isTTY;
+            const shouldRenderMarkdown = shouldStreamInline && runOptions.renderPlain !== true;
+            const printedModels = new Set();
+            const answerFallbacks = new Map();
+            const stripOscProgress = (text) => sanitizeOscProgress(text, shouldStreamInline);
+            const printModelLog = async (model) => {
+                if (printedModels.has(model))
+                    return;
+                printedModels.add(model);
+                const body = stripOscProgress(await sessionStore.readModelLog(sessionMeta.id, model));
+                log("");
+                const fallback = answerFallbacks.get(model);
+                const hasBody = body.length > 0;
+                if (!hasBody && !fallback) {
+                    log(dim(`${model}: (no output recorded)`));
+                    return;
+                }
+                const headingLabel = `[${model}]`;
+                const heading = shouldStreamInline ? kleur.bold(headingLabel) : headingLabel;
+                log(heading);
+                const content = hasBody ? body : (fallback ?? "");
+                const printable = shouldRenderMarkdown ? renderMarkdownAnsi(content) : content;
+                writeInline(printable);
+                if (!printable.endsWith("\n")) {
+                    log("");
+                }
+            };
+            const summary = await runMultiModelApiSession({
+                sessionMeta,
+                runOptions,
+                models: multiModels,
+                cwd,
+                version,
+                onModelDone: shouldStreamInline
+                    ? async (result) => {
+                        if (result.answerText) {
+                            answerFallbacks.set(result.model, result.answerText);
+                        }
+                        await printModelLog(result.model);
+                    }
+                    : undefined,
+            }, {
+                runOracleImpl: muteStdout
+                    ? (opts, deps) => runOracle(opts, { ...deps, allowStdout: false })
+                    : undefined,
+            });
+            if (!shouldStreamInline) {
+                // If we couldn't stream inline (e.g., non-TTY), print all logs after completion.
+                for (const [index, result] of summary.fulfilled.entries()) {
+                    if (index > 0) {
+                        log("");
+                    }
+                    await printModelLog(result.model);
+                }
+            }
+            const aggregateUsage = summary.fulfilled.reduce((acc, entry) => ({
+                inputTokens: acc.inputTokens + entry.usage.inputTokens,
+                outputTokens: acc.outputTokens + entry.usage.outputTokens,
+                reasoningTokens: acc.reasoningTokens + entry.usage.reasoningTokens,
+                totalTokens: acc.totalTokens + entry.usage.totalTokens,
+                cost: (acc.cost ?? 0) + (entry.usage.cost ?? 0),
+            }), { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, cost: 0 });
+            const tokensDisplay = [
+                aggregateUsage.inputTokens,
+                aggregateUsage.outputTokens,
+                aggregateUsage.reasoningTokens,
+                aggregateUsage.totalTokens,
+            ]
+                .map((v, idx) => formatTokenValue(v, {
+                input_tokens: aggregateUsage.inputTokens,
+                output_tokens: aggregateUsage.outputTokens,
+                reasoning_tokens: aggregateUsage.reasoningTokens,
+                total_tokens: aggregateUsage.totalTokens,
+            }, idx))
+                .join("/");
+            const tokensPart = (() => {
+                const parts = tokensDisplay.split("/");
+                if (parts.length !== 4)
+                    return tokensDisplay;
+                return `↑${parts[0]} ↓${parts[1]} ↻${parts[2]} Δ${parts[3]}`;
+            })();
+            const statusColor = summary.rejected.length === 0
+                ? kleur.green
+                : summary.fulfilled.length > 0
+                    ? kleur.yellow
+                    : kleur.red;
+            const overallText = `${summary.fulfilled.length}/${multiModels.length} models`;
+            const { line1 } = formatFinishLine({
+                elapsedMs: summary.elapsedMs,
+                model: overallText,
+                costUsd: aggregateUsage.cost ?? null,
+                tokensPart,
+            });
+            log(statusColor(line1));
+            const hasFailure = summary.rejected.length > 0;
+            const allowPartial = runOptions.partialMode === "ok" && summary.fulfilled.length > 0;
+            if (hasFailure) {
+                const resultLabel = summary.fulfilled.length > 0 ? "partial success" : "failed";
+                log(statusColor(`Multi-model result: ${resultLabel}, ${summary.fulfilled.length}/${multiModels.length} succeeded`));
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: hasFailure ? (allowPartial ? "partial" : "error") : "completed",
+                completedAt: new Date().toISOString(),
+                usage: aggregateUsage,
+                elapsedMs: summary.elapsedMs,
+                errorMessage: undefined,
+                response: undefined,
+                transport: undefined,
+                error: undefined,
+            });
+            const totalCharacters = summary.fulfilled.reduce((sum, entry) => sum + entry.answerText.length, 0);
+            await sendSessionNotification({
+                sessionId: sessionMeta.id,
+                sessionName: sessionMeta.options?.slug ?? sessionMeta.id,
+                mode,
+                model: `${multiModels.length} models`,
+                usage: aggregateUsage,
+                characters: totalCharacters,
+            }, notificationSettings, log);
+            if (runOptions.writeOutputPath) {
+                const savedOutputs = [];
+                for (const entry of summary.fulfilled) {
+                    const modelOutputPath = deriveModelOutputPath(runOptions.writeOutputPath, entry.model);
+                    const savedPath = await writeAssistantOutput(modelOutputPath, entry.answerText, log);
+                    if (savedPath) {
+                        savedOutputs.push({ model: entry.model, path: savedPath });
+                    }
+                }
+                const sessionWithRuns = (await readSessionForManifest(sessionMeta.id)) ?? {
+                    ...sessionMeta,
+                    models: sessionMeta.models,
+                };
+                const runLogs = await collectMultiModelRunLogs(sessionMeta.id, sessionWithRuns.models, summary);
+                const manifestPath = await writeMultiModelOutputManifest({
+                    baseOutputPath: runOptions.writeOutputPath,
+                    sessionId: sessionMeta.id,
+                    status: hasFailure ? (allowPartial ? "partial" : "error") : "completed",
+                    summary,
+                    savedOutputs,
+                    modelRuns: sessionWithRuns.models,
+                    runLogs,
+                    runOptions,
+                    log,
+                });
+                if (savedOutputs.length > 0) {
+                    log(dim("Saved outputs:"));
+                    for (const item of savedOutputs) {
+                        log(dim(`- ${item.model} -> ${item.path}`));
+                    }
+                }
+                if (manifestPath) {
+                    log(dim(`Output manifest: ${manifestPath}`));
+                }
+                if (runLogs.length > 0) {
+                    log(dim(""));
+                    log(dim("Run logs:"));
+                    for (const item of runLogs) {
+                        log(dim(`- ${item.model} -> ${item.path}`));
+                    }
+                }
+            }
+            if (hasFailure) {
+                log(dim("Failures:"));
+                for (const item of summary.rejected) {
+                    const providerContext = providerFailureContextForModel(item.model, runOptions);
+                    log(dim(`- ${item.model}: ${formatMultiModelFailure(item.reason, providerContext)}`));
+                    for (const line of formatMultiModelFailureDetails(item.reason, providerContext)) {
+                        log(dim(line));
+                    }
+                }
+            }
+            if (hasFailure && !allowPartial) {
+                const firstFailure = summary.rejected[0];
+                throw sanitizeMultiModelFailureForThrow(firstFailure.reason, providerFailureContextForModel(firstFailure.model, runOptions));
+            }
+            return;
+        }
+        const singleModelOverride = multiModels.length === 1 ? multiModels[0] : undefined;
+        const apiRunOptions = singleModelOverride
+            ? { ...runOptions, model: singleModelOverride, models: undefined }
+            : runOptions;
+        if (modelForStatus && singleModelOverride == null) {
+            await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                status: "running",
+                startedAt: new Date().toISOString(),
+            });
+        }
+        const result = await runOracle(apiRunOptions, {
+            cwd,
+            log,
+            write,
+            allowStdout: !muteStdout,
+        });
+        if (result.mode !== "live") {
+            throw new Error("Unexpected preview result while running a session.");
+        }
+        await sessionStore.updateSession(sessionMeta.id, {
+            status: "completed",
+            completedAt: new Date().toISOString(),
+            usage: result.usage,
+            elapsedMs: result.elapsedMs,
+            errorMessage: undefined,
+            response: extractResponseMetadata(result.response),
+            transport: undefined,
+            error: undefined,
+        });
+        if (modelForStatus && singleModelOverride == null) {
+            await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                status: "completed",
+                completedAt: new Date().toISOString(),
+                usage: result.usage,
+            });
+        }
+        const answerText = extractTextOutput(result.response);
+        await writeAssistantOutput(runOptions.writeOutputPath, answerText, log);
+        await sendSessionNotification({
+            sessionId: sessionMeta.id,
+            sessionName: sessionMeta.options?.slug ?? sessionMeta.id,
+            mode,
+            model: sessionMeta.model ?? runOptions.model,
+            usage: result.usage,
+            characters: answerText.length,
+        }, notificationSettings, log, answerText.slice(0, 140));
+    }
+    catch (error) {
+        const message = formatError(error);
+        log(`ERROR: ${message}`);
+        markErrorLogged(error);
+        const userError = asOracleUserError(error);
+        const connectionLost = userError?.category === "browser-automation" &&
+            userError.details?.stage === "connection-lost";
+        const assistantTimeout = userError?.category === "browser-automation" &&
+            userError.details?.stage === "assistant-timeout";
+        const cloudflareChallenge = userError?.category === "browser-automation" &&
+            userError.details?.stage === "cloudflare-challenge";
+        if (connectionLost && mode === "browser") {
+            const runtime = userError.details
+                ?.runtime;
+            const recoverableRuntime = runtime ?? sessionMeta.browser?.runtime;
+            if (!hasRecoverableChatGptConversation(recoverableRuntime) &&
+                recoverableRuntime?.promptSubmitted !== true) {
+                log(dim("Chrome disconnected before a ChatGPT conversation was created; marking session error."));
+                if (modelForStatus) {
+                    await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                        status: "error",
+                        completedAt: new Date().toISOString(),
+                        response: { status: "error", incompleteReason: "chrome-disconnected" },
+                        error: {
+                            category: userError.category,
+                            message: userError.message,
+                            details: userError.details,
+                        },
+                    });
+                }
+                await sessionStore.updateSession(sessionMeta.id, {
+                    status: "error",
+                    completedAt: new Date().toISOString(),
+                    errorMessage: message,
+                    mode,
+                    browser: {
+                        config: browserConfig,
+                        runtime: recoverableRuntime,
+                    },
+                    response: { status: "error", incompleteReason: "chrome-disconnected" },
+                    error: {
+                        category: userError.category,
+                        message: userError.message,
+                        details: userError.details,
+                    },
+                });
+                throw error;
+            }
+            log(dim("Chrome disconnected before completion; keeping session running for reattach."));
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "running",
+                    completedAt: undefined,
+                });
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: "running",
+                errorMessage: message,
+                mode,
+                browser: {
+                    config: browserConfig,
+                    runtime: runtime ?? sessionMeta.browser?.runtime,
+                },
+                response: { status: "running", incompleteReason: "chrome-disconnected" },
+            });
+            return;
+        }
+        if (assistantTimeout && mode === "browser") {
+            const runtime = userError.details
+                ?.runtime;
+            log(dim("Assistant response timed out; marking capture incomplete for reattach."));
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "error",
+                    completedAt: new Date().toISOString(),
+                    response: { status: "incomplete", incompleteReason: "incomplete-capture" },
+                    error: {
+                        category: userError.category,
+                        message: userError.message,
+                        details: userError.details,
+                    },
+                });
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: "error",
+                completedAt: new Date().toISOString(),
+                errorMessage: message,
+                mode,
+                browser: {
+                    config: browserConfig,
+                    runtime: runtime ?? sessionMeta.browser?.runtime,
+                },
+                response: { status: "incomplete", incompleteReason: "incomplete-capture" },
+                error: {
+                    category: userError.category,
+                    message: userError.message,
+                    details: userError.details,
+                },
+            });
+            const autoReattachIntervalMs = browserConfig?.autoReattachIntervalMs ?? 0;
+            if (autoReattachIntervalMs > 0) {
+                const autoRuntime = runtime ?? sessionMeta.browser?.runtime;
+                const success = await autoReattachUntilComplete({
+                    sessionMeta,
+                    runtime: autoRuntime ?? undefined,
+                    browserConfig,
+                    runOptions,
+                    modelForStatus,
+                    notificationSettings,
+                    log,
+                });
+                if (success) {
+                    return;
+                }
+            }
+            log(dim(`Reattach later with: oracle session ${sessionMeta.id}`));
+            return;
+        }
+        if (cloudflareChallenge && mode === "browser") {
+            const details = userError.details;
+            log(dim("Cloudflare challenge detected; browser left running so you can complete the check."));
+            if (details?.reuseProfileHint) {
+                log(dim(`Reuse this browser profile with: ${details.reuseProfileHint}`));
+            }
+        }
+        if (userError) {
+            log(dim(`User error (${userError.category}): ${userError.message}`));
+        }
+        const responseMetadata = error instanceof OracleResponseError ? error.metadata : undefined;
+        const metadataLine = formatResponseMetadata(responseMetadata);
+        if (metadataLine) {
+            log(dim(`Response metadata: ${metadataLine}`));
+        }
+        const transportMetadata = error instanceof OracleTransportError ? { reason: error.reason } : undefined;
+        const transportLine = formatTransportMetadata(transportMetadata);
+        if (transportLine) {
+            log(dim(`Transport: ${transportLine}`));
+        }
+        const browserRuntime = mode === "browser"
+            ? userError?.details?.runtime
+            : undefined;
+        await sessionStore.updateSession(sessionMeta.id, {
+            status: "error",
+            completedAt: new Date().toISOString(),
+            errorMessage: message,
+            mode,
+            browser: browserConfig
+                ? {
+                    config: browserConfig,
+                    runtime: browserRuntime ?? undefined,
+                }
+                : undefined,
+            response: responseMetadata,
+            transport: transportMetadata,
+            error: userError
+                ? {
+                    category: userError.category,
+                    message: userError.message,
+                    details: userError.details,
+                }
+                : undefined,
+        });
+        if (modelForStatus) {
+            await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                status: "error",
+                completedAt: new Date().toISOString(),
+            });
+        }
+        throw error;
+    }
+}
+function mergeArtifacts(existing, additions) {
+    const merged = new Map();
+    for (const artifact of existing ?? []) {
+        merged.set(`${artifact.kind}:${artifact.path}`, artifact);
+    }
+    for (const artifact of additions ?? []) {
+        merged.set(`${artifact.kind}:${artifact.path}`, artifact);
+    }
+    const values = Array.from(merged.values());
+    return values.length > 0 ? values : undefined;
+}
+function formatError(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+function providerFailureContextForModel(model, runOptions) {
+    return {
+        model,
+        providerMode: runOptions.provider,
+        azure: runOptions.azure,
+        baseUrl: runOptions.baseUrl,
+        apiKey: runOptions.apiKey,
+    };
+}
+function formatMultiModelFailure(error, context) {
+    const userError = asOracleUserError(error);
+    if (userError) {
+        return `${userError.category}, ${userError.message}`;
+    }
+    const providerFailure = classifyProviderFailure(error, context);
+    if (providerFailure) {
+        return providerFailure.label;
+    }
+    if (error instanceof OracleTransportError) {
+        return `${error.reason}, ${error.message}`;
+    }
+    if (error instanceof OracleResponseError) {
+        return error.message;
+    }
+    return formatError(error);
+}
+function formatMultiModelFailureDetails(error, context) {
+    const providerFailure = classifyProviderFailure(error, context);
+    if (!providerFailure) {
+        return [];
+    }
+    const lines = [];
+    if (providerFailure.keyEnv) {
+        lines.push(`  key: ${providerFailure.keyEnv}`);
+    }
+    lines.push(`  provider said: ${providerFailure.providerMessage}`);
+    lines.push(`  fix: ${providerFailure.fix}`);
+    return lines;
+}
+function sanitizeMultiModelFailureForThrow(error, context) {
+    const providerFailure = classifyProviderFailure(error, context);
+    if (!providerFailure) {
+        return error;
+    }
+    const modelPrefix = typeof context === "object" && context?.model ? `${context.model}: ` : "";
+    const message = `${modelPrefix}${providerFailure.label}: ${providerFailure.providerMessage}`;
+    if (!(error instanceof Error)) {
+        return new Error(message);
+    }
+    let sanitized;
+    if (error instanceof OracleTransportError) {
+        sanitized = new OracleTransportError(error.reason, message);
+    }
+    else if (error instanceof OracleResponseError) {
+        sanitized = new OracleResponseError(message, error.response);
+    }
+    else {
+        sanitized = new Error(message);
+        sanitized.name = error.name;
+    }
+    if (error.stack) {
+        const [, ...rest] = error.stack.split("\n");
+        sanitized.stack = [sanitized.name ? `${sanitized.name}: ${message}` : message, ...rest].join("\n");
+    }
+    return sanitized;
+}
+export function deriveOutputManifestPath(basePath) {
+    const ext = path.extname(basePath);
+    const stem = path.basename(basePath, ext);
+    const dir = path.dirname(basePath);
+    return path.join(dir, `${stem}.oracle.json`);
+}
+async function collectMultiModelRunLogs(sessionId, modelRuns, summary) {
+    const sessionDir = await resolveSessionDir(sessionId);
+    const logsByModel = new Map();
+    for (const run of modelRuns ?? []) {
+        if (run.log?.path) {
+            logsByModel.set(run.model, resolveSessionPath(sessionDir, run.log.path));
+        }
+    }
+    for (const entry of summary.fulfilled) {
+        if (!logsByModel.has(entry.model)) {
+            logsByModel.set(entry.model, entry.logPath);
+        }
+    }
+    return [...logsByModel.entries()].map(([model, logPath]) => ({ model, path: logPath }));
+}
+async function writeMultiModelOutputManifest({ baseOutputPath, sessionId, status, summary, savedOutputs, modelRuns, runLogs, runOptions, log, }) {
+    const manifestPath = deriveOutputManifestPath(baseOutputPath);
+    const normalizedTarget = path.resolve(manifestPath);
+    const normalizedSessionsDir = path.resolve(sessionStore.sessionsDir());
+    if (normalizedTarget === normalizedSessionsDir ||
+        normalizedTarget.startsWith(`${normalizedSessionsDir}${path.sep}`)) {
+        log(dim(`output manifest skipped: refusing to write inside session storage (${normalizedSessionsDir}).`));
+        return undefined;
+    }
+    const manifest = buildMultiModelOutputManifest({
+        baseOutputPath,
+        sessionId,
+        status,
+        summary,
+        savedOutputs,
+        modelRuns,
+        runLogs,
+        runOptions,
+    });
+    try {
+        await fs.mkdir(path.dirname(normalizedTarget), { recursive: true });
+        await fs.writeFile(normalizedTarget, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+        return normalizedTarget;
+    }
+    catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        log(dim(`output manifest failed (${reason}); session completed anyway.`));
+        return undefined;
+    }
+}
+function buildMultiModelOutputManifest({ baseOutputPath, sessionId, status, summary, savedOutputs, modelRuns, runLogs, runOptions, }) {
+    const outputByModel = new Map(savedOutputs.map((entry) => [entry.model, entry.path]));
+    const logsByModel = new Map(runLogs.map((entry) => [entry.model, entry.path]));
+    const runsByModel = new Map((modelRuns ?? []).map((run) => [run.model, run]));
+    const fulfilledByModel = new Map(summary.fulfilled.map((entry) => [entry.model, entry]));
+    const rejectedByModel = new Map(summary.rejected.map((entry) => [entry.model, entry.reason]));
+    const orderedModels = [
+        ...summary.fulfilled.map((entry) => entry.model),
+        ...summary.rejected.map((entry) => entry.model),
+    ];
+    return {
+        version: 1,
+        sessionId,
+        status,
+        outputBasePath: path.resolve(baseOutputPath),
+        createdAt: new Date().toISOString(),
+        models: orderedModels.map((model) => {
+            const run = runsByModel.get(model);
+            const fulfilled = fulfilledByModel.get(model);
+            const reason = rejectedByModel.get(model);
+            const userError = reason ? asOracleUserError(reason) : undefined;
+            const providerFailure = reason
+                ? classifyProviderFailure(reason, providerFailureContextForModel(model, runOptions))
+                : undefined;
+            return {
+                model,
+                status: fulfilled ? "completed" : reason ? "error" : (run?.status ?? "error"),
+                outputPath: outputByModel.get(model),
+                logPath: logsByModel.get(model),
+                errorCategory: run?.error?.category ?? userError?.category ?? providerFailure?.category,
+                errorMessage: run?.error?.message ??
+                    userError?.message ??
+                    providerFailure?.label ??
+                    (reason ? formatError(reason) : undefined),
+                elapsedMs: calculateModelElapsedMs(run),
+                usage: run?.usage ?? fulfilled?.usage,
+            };
+        }),
+    };
+}
+function calculateModelElapsedMs(run) {
+    if (!run?.startedAt || !run.completedAt) {
+        return undefined;
+    }
+    const startedMs = Date.parse(run.startedAt);
+    const completedMs = Date.parse(run.completedAt);
+    if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs) || completedMs < startedMs) {
+        return undefined;
+    }
+    return completedMs - startedMs;
+}
+async function readSessionForManifest(sessionId) {
+    try {
+        return (await sessionStore.readSession(sessionId)) ?? null;
+    }
+    catch {
+        return null;
+    }
+}
+async function resolveSessionDir(sessionId) {
+    try {
+        return (await sessionStore.getPaths(sessionId)).dir;
+    }
+    catch {
+        return null;
+    }
+}
+function resolveSessionPath(sessionDir, targetPath) {
+    if (path.isAbsolute(targetPath) || !sessionDir) {
+        return targetPath;
+    }
+    return path.join(sessionDir, targetPath);
+}
+async function writeAssistantOutput(targetPath, content, log) {
+    if (!targetPath)
+        return;
+    if (!content || content.trim().length === 0) {
+        log(dim("write-output skipped: no assistant content to save."));
+        return;
+    }
+    const normalizedTarget = path.resolve(targetPath);
+    const normalizedSessionsDir = path.resolve(sessionStore.sessionsDir());
+    if (normalizedTarget === normalizedSessionsDir ||
+        normalizedTarget.startsWith(`${normalizedSessionsDir}${path.sep}`)) {
+        log(dim(`write-output skipped: refusing to write inside session storage (${normalizedSessionsDir}).`));
+        return;
+    }
+    try {
+        await fs.mkdir(path.dirname(normalizedTarget), { recursive: true });
+        const payload = content.endsWith("\n") ? content : `${content}\n`;
+        await fs.writeFile(normalizedTarget, payload, "utf8");
+        log(dim(`Saved assistant output to ${normalizedTarget}`));
+        return normalizedTarget;
+    }
+    catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (isPermissionError(error)) {
+            const fallbackPath = buildFallbackPath(normalizedTarget);
+            if (fallbackPath) {
+                try {
+                    await fs.mkdir(path.dirname(fallbackPath), { recursive: true });
+                    const payload = content.endsWith("\n") ? content : `${content}\n`;
+                    await fs.writeFile(fallbackPath, payload, "utf8");
+                    log(dim(`write-output fallback to ${fallbackPath} (original failed: ${reason})`));
+                    return fallbackPath;
+                }
+                catch (innerError) {
+                    const innerReason = innerError instanceof Error ? innerError.message : String(innerError);
+                    log(dim(`write-output failed (${reason}); fallback failed (${innerReason}); session completed anyway.`));
+                    return;
+                }
+            }
+        }
+        log(dim(`write-output failed (${reason}); session completed anyway.`));
+    }
+}
+async function autoReattachUntilComplete({ sessionMeta, runtime, browserConfig, runOptions, modelForStatus, notificationSettings, log, }) {
+    if (!runtime || !browserConfig) {
+        log(dim("Auto-reattach disabled: missing runtime or browser config."));
+        return false;
+    }
+    const delayMs = Math.max(0, browserConfig.autoReattachDelayMs ?? 0);
+    const intervalMs = Math.max(0, browserConfig.autoReattachIntervalMs ?? 0);
+    if (intervalMs <= 0) {
+        return false;
+    }
+    const timeoutMs = Math.max(0, browserConfig.autoReattachTimeoutMs ?? 0) ||
+        Math.max(0, browserConfig.timeoutMs ?? 0) ||
+        120_000;
+    const maxTotalMs = 2 * 60 * 60 * 1000; // 2h hard cap; avoid infinite polling by default.
+    const maxDeadline = Date.now() + maxTotalMs;
+    if (delayMs > 0) {
+        log(dim(`Auto-reattach starting in ${formatElapsed(delayMs)}...`));
+        await wait(delayMs);
+    }
+    log(dim(`Auto-reattach will stop after ${formatElapsed(maxTotalMs)} if no answer is captured.`));
+    const logger = ((message) => {
+        if (message) {
+            log(dim(message));
+        }
+    });
+    logger.verbose = true;
+    let attempt = 0;
+    for (;;) {
+        const remainingBudgetMs = maxDeadline - Date.now();
+        if (remainingBudgetMs <= 0) {
+            log(dim(`Auto-reattach stopped after ${formatElapsed(maxTotalMs)} without capturing an answer.`));
+            return false;
+        }
+        attempt += 1;
+        log(dim(`Auto-reattach attempt ${attempt}...`));
+        try {
+            const reattachConfig = {
+                ...browserConfig,
+                timeoutMs,
+            };
+            const result = await resumeBrowserSession(runtime, reattachConfig, logger, {
+                promptPreview: sessionMeta.promptPreview,
+            });
+            const answerText = result.answerMarkdown || result.answerText || "";
+            const outputTokens = estimateTokenCount(answerText);
+            const artifacts = await ensureSessionArtifacts({
+                sessionId: sessionMeta.id,
+                prompt: runOptions.prompt,
+                answerMarkdown: answerText,
+                conversationUrl: runtime.tabUrl,
+                browserConfig,
+                existingArtifacts: sessionMeta.artifacts,
+                logger,
+            });
+            const logWriter = sessionStore.createLogWriter(sessionMeta.id);
+            logWriter.logLine(`[auto-reattach] captured assistant response on attempt ${attempt}`);
+            logWriter.logLine("Answer:");
+            logWriter.logLine(answerText);
+            logWriter.stream.end();
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "completed",
+                    completedAt: new Date().toISOString(),
+                    usage: {
+                        inputTokens: 0,
+                        outputTokens,
+                        reasoningTokens: 0,
+                        totalTokens: outputTokens,
+                    },
+                });
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: "completed",
+                completedAt: new Date().toISOString(),
+                usage: {
+                    inputTokens: 0,
+                    outputTokens,
+                    reasoningTokens: 0,
+                    totalTokens: outputTokens,
+                },
+                errorMessage: undefined,
+                browser: {
+                    config: browserConfig,
+                    runtime,
+                },
+                artifacts: mergeArtifacts(sessionMeta.artifacts, artifacts),
+                response: { status: "completed" },
+                error: undefined,
+                transport: undefined,
+            });
+            await writeAssistantOutput(runOptions.writeOutputPath, answerText, log);
+            await sendSessionNotification({
+                sessionId: sessionMeta.id,
+                sessionName: sessionMeta.options?.slug ?? sessionMeta.id,
+                mode: sessionMeta.mode ?? "browser",
+                model: sessionMeta.model ?? runOptions.model,
+                usage: {
+                    inputTokens: 0,
+                    outputTokens,
+                },
+                characters: answerText.length,
+            }, notificationSettings, log, answerText.slice(0, 140));
+            log(kleur.green("Auto-reattach succeeded; session marked completed."));
+            return true;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            log(dim(`Auto-reattach attempt ${attempt} failed: ${message}`));
+        }
+        const remainingAfterAttemptMs = maxDeadline - Date.now();
+        if (remainingAfterAttemptMs <= 0) {
+            log(dim(`Auto-reattach stopped after ${formatElapsed(maxTotalMs)} without capturing an answer.`));
+            return false;
+        }
+        await wait(Math.min(intervalMs, remainingAfterAttemptMs));
+    }
+}
+export function deriveModelOutputPath(basePath, model) {
+    if (!basePath)
+        return undefined;
+    const ext = path.extname(basePath);
+    const stem = path.basename(basePath, ext);
+    const dir = path.dirname(basePath);
+    const suffix = ext.length > 0 ? `${stem}.${model}${ext}` : `${stem}.${model}`;
+    return path.join(dir, suffix);
+}
+function isPermissionError(error) {
+    if (!(error instanceof Error))
+        return false;
+    const code = error.code;
+    return code === "EACCES" || code === "EPERM";
+}
+function buildFallbackPath(original) {
+    const ext = path.extname(original);
+    const stem = path.basename(original, ext);
+    const dir = getCwd();
+    const candidate = ext ? `${stem}.fallback${ext}` : `${stem}.fallback`;
+    const fallback = path.join(dir, candidate);
+    const normalizedSessionsDir = path.resolve(sessionStore.sessionsDir());
+    const normalizedFallback = path.resolve(fallback);
+    if (normalizedFallback === normalizedSessionsDir ||
+        normalizedFallback.startsWith(`${normalizedSessionsDir}${path.sep}`)) {
+        return null;
+    }
+    return fallback;
+}

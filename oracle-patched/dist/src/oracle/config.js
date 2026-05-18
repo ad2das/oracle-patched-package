@@ -1,0 +1,228 @@
+import { createRequire } from "node:module";
+import { stringifyTokenizerInput } from "./tokenStringifier.js";
+const require = createRequire(import.meta.url);
+let countTokensGpt5Impl;
+let countTokensGpt5ProImpl;
+let countTokensAnthropicImpl;
+export const DEFAULT_MODEL = "gpt-5.5-pro";
+export const PRO_MODELS = new Set([
+    "gpt-5.5-pro",
+    "gpt-5.4-pro",
+    "gpt-5.1-pro",
+    "gpt-5-pro",
+    "gpt-5.2-pro",
+    "claude-4.6-sonnet",
+    "claude-4.1-opus",
+]);
+const countTokensGpt5 = (input, options) => {
+    countTokensGpt5Impl ??= require("gpt-tokenizer/model/gpt-5").countTokens;
+    return countTokensGpt5Impl(input, options);
+};
+const countTokensGpt5Pro = (input, options) => {
+    countTokensGpt5ProImpl ??= require("gpt-tokenizer/model/gpt-5-pro").countTokens;
+    return countTokensGpt5ProImpl(input, options);
+};
+const countTokensAnthropic = (input) => {
+    countTokensAnthropicImpl ??= require("@anthropic-ai/tokenizer").countTokens;
+    return countTokensAnthropicImpl(stringifyTokenizerInput(input));
+};
+export const MODEL_CONFIGS = {
+    "gpt-5.5-pro": {
+        model: "gpt-5.5-pro",
+        provider: "openai",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 30 / 1_000_000,
+            outputPerToken: 180 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh" },
+    },
+    "gpt-5.5": {
+        model: "gpt-5.5",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 5 / 1_000_000,
+            outputPerToken: 30 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh" },
+    },
+    "gpt-5.1-pro": {
+        model: "gpt-5.1-pro",
+        apiModel: "gpt-5.5-pro",
+        provider: "openai",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 30 / 1_000_000,
+            outputPerToken: 180 / 1_000_000,
+        },
+        reasoning: null,
+    },
+    "gpt-5-pro": {
+        model: "gpt-5-pro",
+        provider: "openai",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 15 / 1_000_000,
+            outputPerToken: 120 / 1_000_000,
+        },
+        reasoning: null,
+    },
+    "gpt-5.1": {
+        model: "gpt-5.1",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 1.25 / 1_000_000,
+            outputPerToken: 10 / 1_000_000,
+        },
+        reasoning: { effort: "high" },
+    },
+    "gpt-5.1-codex": {
+        model: "gpt-5.1-codex",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 1.25 / 1_000_000,
+            outputPerToken: 10 / 1_000_000,
+        },
+        reasoning: { effort: "high" },
+    },
+    "gpt-5.4": {
+        model: "gpt-5.4",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 2.5 / 1_000_000,
+            outputPerToken: 15 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh" },
+    },
+    "gpt-5.4-pro": {
+        model: "gpt-5.4-pro",
+        provider: "openai",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 30 / 1_000_000,
+            outputPerToken: 180 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh" },
+    },
+    "gpt-5.2": {
+        model: "gpt-5.2",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 1.75 / 1_000_000,
+            outputPerToken: 14 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh" },
+    },
+    "gpt-5.2-instant": {
+        model: "gpt-5.2-instant",
+        apiModel: "gpt-5.2-chat-latest",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 1.75 / 1_000_000,
+            outputPerToken: 14 / 1_000_000,
+        },
+        reasoning: null,
+    },
+    "gpt-5.2-pro": {
+        model: "gpt-5.2-pro",
+        apiModel: "gpt-5.5-pro",
+        provider: "openai",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 196000,
+        pricing: {
+            inputPerToken: 30 / 1_000_000,
+            outputPerToken: 180 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh" },
+    },
+    "gemini-3.1-pro": {
+        model: "gemini-3.1-pro",
+        provider: "google",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 200000,
+        pricing: {
+            inputPerToken: 2 / 1_000_000,
+            outputPerToken: 12 / 1_000_000,
+        },
+        reasoning: null,
+        supportsBackground: false,
+        supportsSearch: true,
+    },
+    "gemini-3-pro": {
+        model: "gemini-3-pro",
+        provider: "google",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 200000,
+        pricing: {
+            inputPerToken: 2 / 1_000_000,
+            outputPerToken: 12 / 1_000_000,
+        },
+        reasoning: null,
+        supportsBackground: false,
+        supportsSearch: true,
+    },
+    "claude-4.6-sonnet": {
+        model: "claude-4.6-sonnet",
+        apiModel: "claude-sonnet-4-6",
+        provider: "anthropic",
+        tokenizer: countTokensAnthropic,
+        inputLimit: 200000,
+        pricing: {
+            inputPerToken: 3 / 1_000_000,
+            outputPerToken: 15 / 1_000_000,
+        },
+        reasoning: null,
+        supportsBackground: false,
+        supportsSearch: false,
+    },
+    "claude-4.1-opus": {
+        model: "claude-4.1-opus",
+        apiModel: "claude-opus-4-1",
+        provider: "anthropic",
+        tokenizer: countTokensAnthropic,
+        inputLimit: 200000,
+        pricing: {
+            inputPerToken: 15 / 1_000_000,
+            outputPerToken: 75 / 1_000_000,
+        },
+        reasoning: { effort: "high" },
+        supportsBackground: false,
+        supportsSearch: false,
+    },
+    "grok-4.1": {
+        model: "grok-4.1",
+        apiModel: "grok-4-1-fast-reasoning",
+        provider: "xai",
+        tokenizer: countTokensGpt5Pro,
+        inputLimit: 2_000_000,
+        pricing: {
+            inputPerToken: 0.2 / 1_000_000,
+            outputPerToken: 0.5 / 1_000_000,
+        },
+        reasoning: null,
+        supportsBackground: false,
+        supportsSearch: true,
+        searchToolType: "web_search",
+    },
+};
+export const DEFAULT_SYSTEM_PROMPT = [
+    "You are Oracle, a focused one-shot problem solver.",
+    "Emphasize direct answers and cite any files referenced.",
+].join(" ");
+export const TOKENIZER_OPTIONS = { allowedSpecial: "all" };

@@ -1,0 +1,291 @@
+import CDP from "chrome-remote-interface";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { waitForAssistantResponse, captureAssistantMarkdown, navigateToChatGPT, ensureNotBlocked, ensureLoggedIn, ensurePromptReady, } from "./pageActions.js";
+import { launchChrome, connectToChrome, hideChromeWindow, connectToRemoteChromeTarget, listRemoteChromeTargets, } from "./chromeLifecycle.js";
+import { resolveBrowserConfig } from "./config.js";
+import { syncCookies } from "./cookies.js";
+import { CHATGPT_URL, CONVERSATION_TURN_SELECTOR } from "./constants.js";
+import { cleanupStaleProfileState } from "./profileState.js";
+import { readDevToolsActivePortInfo } from "./detect.js";
+import { pickTarget, extractConversationIdFromUrl, buildConversationUrl, withTimeout, openConversationFromSidebar, openConversationFromSidebarWithRetry, waitForLocationChange, readConversationTurnIndex, buildPromptEchoMatcher, recoverPromptEcho, alignPromptEchoMarkdown, } from "./reattachHelpers.js";
+import { waitForDeepResearchCompletion } from "./actions/deepResearch.js";
+export async function resumeBrowserSession(runtime, config, logger, deps = {}) {
+    const recoverSession = deps.recoverSession ??
+        (async (runtimeMeta, configMeta) => resumeBrowserSessionViaNewChrome(runtimeMeta, configMeta, logger, deps));
+    if (!runtime.chromePort && !runtime.chromeBrowserWSEndpoint) {
+        logger("No running Chrome detected; reopening browser to locate the session.");
+        return recoverSession(runtime, config);
+    }
+    try {
+        const liveRuntime = (await refreshAttachRuntime(runtime).catch(() => runtime)) ?? runtime;
+        const host = liveRuntime.chromeHost ?? "127.0.0.1";
+        const port = liveRuntime.chromePort ?? inferPortFromBrowserWSEndpoint(liveRuntime.chromeBrowserWSEndpoint);
+        const browserWSEndpoint = liveRuntime.chromeBrowserWSEndpoint ?? undefined;
+        const listTargets = deps.listTargets ??
+            (async () => (await listRemoteChromeTargets({
+                host,
+                port: port ?? 9222,
+                browserWSEndpoint,
+            })));
+        const targetList = (await listTargets());
+        const target = pickTarget(targetList, liveRuntime);
+        const connection = browserWSEndpoint && !deps.connect
+            ? await connectToRemoteChromeTarget(host, port ?? 9222, logger, {
+                browserWSEndpoint,
+                targetId: target?.targetId ?? target?.id,
+                closeTargetOnDispose: false,
+            })
+            : {
+                client: (await (deps.connect ?? ((options) => CDP(options)))(browserWSEndpoint
+                    ? {
+                        target: browserWSEndpoint,
+                        local: true,
+                        targetId: target?.targetId ?? target?.id,
+                    }
+                    : {
+                        host,
+                        port,
+                        target: target?.targetId ?? target?.id,
+                    })),
+                close: async () => undefined,
+            };
+        const client = connection.client;
+        const { Runtime, DOM, Page } = client;
+        if (Runtime?.enable) {
+            await Runtime.enable();
+        }
+        if (DOM && typeof DOM.enable === "function") {
+            await DOM.enable();
+        }
+        if (Page && typeof Page.enable === "function") {
+            await Page.enable();
+        }
+        const ensureConversationOpen = async () => {
+            const { result } = await Runtime.evaluate({
+                expression: "location.href",
+                returnByValue: true,
+            });
+            const href = typeof result?.value === "string" ? result.value : "";
+            if (href.includes("/c/")) {
+                const currentId = extractConversationIdFromUrl(href);
+                if (!runtime.conversationId || (currentId && currentId === runtime.conversationId)) {
+                    return;
+                }
+            }
+            const opened = await openConversationFromSidebarWithRetry(Runtime, {
+                conversationId: runtime.conversationId ?? extractConversationIdFromUrl(runtime.tabUrl ?? ""),
+                preferProjects: true,
+                promptPreview: deps.promptPreview,
+            }, 15_000);
+            if (!opened) {
+                throw new Error("Unable to locate prior ChatGPT conversation in sidebar.");
+            }
+            await waitForLocationChange(Runtime, 15_000);
+        };
+        const waitForResponse = deps.waitForAssistantResponse ?? waitForAssistantResponse;
+        const captureMarkdown = deps.captureAssistantMarkdown ?? captureAssistantMarkdown;
+        const timeoutMs = config?.timeoutMs ?? 120_000;
+        const pingTimeoutMs = Math.min(5_000, Math.max(1_500, Math.floor(timeoutMs * 0.05)));
+        await withTimeout(Runtime.evaluate({ expression: "1+1", returnByValue: true }), pingTimeoutMs, "Reattach target did not respond");
+        await ensureConversationOpen();
+        const minTurnIndex = (await readPromptPreviewTurnIndex(Runtime, deps.promptPreview)) ??
+            (deps.promptPreview ? null : await readConversationTurnIndex(Runtime, logger));
+        if (config?.researchMode === "deep") {
+            const waitForDeepResearch = deps.waitForDeepResearchCompletion ?? waitForDeepResearchCompletion;
+            const researchResult = await withTimeout(waitForDeepResearch(Runtime, logger, timeoutMs, minTurnIndex ?? undefined, Page, client), timeoutMs + 5_000, "Reattach Deep Research response timed out");
+            await connection.close().catch(() => undefined);
+            return {
+                answerText: researchResult.text,
+                answerMarkdown: researchResult.text,
+            };
+        }
+        const promptEcho = buildPromptEchoMatcher(deps.promptPreview);
+        const answer = await withTimeout(waitForResponse(Runtime, timeoutMs, logger, minTurnIndex ?? undefined), timeoutMs + 5_000, "Reattach response timed out");
+        const recovered = await recoverPromptEcho(Runtime, answer, promptEcho, logger, minTurnIndex, timeoutMs);
+        const markdown = (await withTimeout(captureMarkdown(Runtime, recovered.meta, logger), 15_000, "Reattach markdown capture timed out")) ?? recovered.text;
+        const aligned = alignPromptEchoMarkdown(recovered.text, markdown, promptEcho, logger);
+        await connection.close().catch(() => undefined);
+        return { answerText: aligned.answerText, answerMarkdown: aligned.answerMarkdown };
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger(`Existing Chrome reattach failed (${message}); reopening browser to locate the session.`);
+        return recoverSession(runtime, config);
+    }
+}
+async function refreshAttachRuntime(runtime) {
+    if (!runtime.chromeProfileRoot) {
+        return runtime;
+    }
+    const host = runtime.chromeHost ?? "127.0.0.1";
+    const activePort = await readDevToolsActivePortInfo(runtime.chromeProfileRoot, {
+        host,
+    });
+    if (!activePort) {
+        return runtime;
+    }
+    return {
+        ...runtime,
+        chromeHost: host,
+        chromePort: activePort.port,
+        chromeBrowserWSEndpoint: activePort.browserWSEndpoint,
+    };
+}
+function inferPortFromBrowserWSEndpoint(browserWSEndpoint) {
+    if (!browserWSEndpoint) {
+        return undefined;
+    }
+    try {
+        const parsed = new URL(browserWSEndpoint);
+        const port = Number.parseInt(parsed.port, 10);
+        if (Number.isFinite(port) && port > 0) {
+            return port;
+        }
+    }
+    catch {
+        // ignore malformed ws endpoints and fall back to caller defaults
+    }
+    return undefined;
+}
+async function resumeBrowserSessionViaNewChrome(runtime, config, logger, deps) {
+    const resolved = resolveBrowserConfig(config ?? {});
+    const manualLogin = Boolean(resolved.manualLogin);
+    const userDataDir = manualLogin
+        ? (resolved.manualLoginProfileDir ?? path.join(os.homedir(), ".oracle", "browser-profile"))
+        : await mkdtemp(path.join(os.tmpdir(), "oracle-reattach-"));
+    if (manualLogin) {
+        await mkdir(userDataDir, { recursive: true });
+    }
+    const chrome = await launchChrome(resolved, userDataDir, logger);
+    const chromeHost = chrome.host ?? "127.0.0.1";
+    const client = await connectToChrome(chrome.port, logger, chromeHost);
+    const { Network, Page, Runtime, DOM } = client;
+    if (Runtime?.enable) {
+        await Runtime.enable();
+    }
+    if (DOM && typeof DOM.enable === "function") {
+        await DOM.enable();
+    }
+    if (!resolved.headless && resolved.hideWindow) {
+        await hideChromeWindow(chrome, logger);
+    }
+    let appliedCookies = 0;
+    if (!manualLogin && resolved.cookieSync) {
+        appliedCookies = await syncCookies(Network, resolved.url, resolved.chromeProfile, logger, {
+            allowErrors: resolved.allowCookieErrors,
+            filterNames: resolved.cookieNames ?? undefined,
+            inlineCookies: resolved.inlineCookies ?? undefined,
+            cookiePath: resolved.chromeCookiePath ?? undefined,
+            waitMs: resolved.cookieSyncWaitMs ?? 0,
+        });
+    }
+    await navigateToChatGPT(Page, Runtime, CHATGPT_URL, logger);
+    await ensureNotBlocked(Runtime, resolved.headless, logger);
+    await ensureLoggedIn(Runtime, logger, { appliedCookies });
+    if (resolved.url !== CHATGPT_URL) {
+        await navigateToChatGPT(Page, Runtime, resolved.url, logger);
+        await ensureNotBlocked(Runtime, resolved.headless, logger);
+    }
+    await ensurePromptReady(Runtime, resolved.inputTimeoutMs, logger);
+    const conversationUrl = buildConversationUrl(runtime, resolved.url);
+    if (conversationUrl) {
+        logger(`Reopening conversation at ${conversationUrl}`);
+        await navigateToChatGPT(Page, Runtime, conversationUrl, logger);
+        await ensureNotBlocked(Runtime, resolved.headless, logger);
+        await ensurePromptReady(Runtime, resolved.inputTimeoutMs, logger);
+    }
+    else {
+        const opened = await openConversationFromSidebarWithRetry(Runtime, {
+            conversationId: runtime.conversationId ?? extractConversationIdFromUrl(runtime.tabUrl ?? ""),
+            preferProjects: resolved.url !== CHATGPT_URL ||
+                Boolean(runtime.tabUrl && (/\/g\//.test(runtime.tabUrl) || runtime.tabUrl.includes("/project"))),
+            promptPreview: deps.promptPreview,
+        }, 15_000);
+        if (!opened) {
+            throw new Error("Unable to locate prior ChatGPT conversation in sidebar.");
+        }
+        await waitForLocationChange(Runtime, 15_000);
+    }
+    const waitForResponse = deps.waitForAssistantResponse ?? waitForAssistantResponse;
+    const captureMarkdown = deps.captureAssistantMarkdown ?? captureAssistantMarkdown;
+    const timeoutMs = resolved.timeoutMs ?? 120_000;
+    const cleanup = async () => {
+        if (client && typeof client.close === "function") {
+            try {
+                await client.close();
+            }
+            catch {
+                // ignore
+            }
+        }
+        if (!resolved.keepBrowser) {
+            try {
+                await chrome.kill();
+            }
+            catch {
+                // ignore
+            }
+            if (manualLogin) {
+                await cleanupStaleProfileState(userDataDir, logger, { lockRemovalMode: "never" }).catch(() => undefined);
+            }
+            else {
+                await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+            }
+        }
+    };
+    const minTurnIndex = (await readPromptPreviewTurnIndex(Runtime, deps.promptPreview)) ??
+        (deps.promptPreview ? null : await readConversationTurnIndex(Runtime, logger));
+    if (resolved.researchMode === "deep") {
+        const waitForDeepResearch = deps.waitForDeepResearchCompletion ?? waitForDeepResearchCompletion;
+        const researchResult = await waitForDeepResearch(Runtime, logger, timeoutMs, minTurnIndex ?? undefined, Page, client);
+        await cleanup();
+        return {
+            answerText: researchResult.text,
+            answerMarkdown: researchResult.text,
+        };
+    }
+    const promptEcho = buildPromptEchoMatcher(deps.promptPreview);
+    const answer = await waitForResponse(Runtime, timeoutMs, logger, minTurnIndex ?? undefined);
+    const recovered = await recoverPromptEcho(Runtime, answer, promptEcho, logger, minTurnIndex, timeoutMs);
+    const markdown = (await captureMarkdown(Runtime, recovered.meta, logger)) ?? recovered.text;
+    const aligned = alignPromptEchoMarkdown(recovered.text, markdown, promptEcho, logger);
+    await cleanup();
+    return { answerText: aligned.answerText, answerMarkdown: aligned.answerMarkdown };
+}
+async function readPromptPreviewTurnIndex(Runtime, promptPreview) {
+    const preview = promptPreview?.trim();
+    if (!preview) {
+        return null;
+    }
+    const { result } = await Runtime.evaluate({
+        expression: `(() => {
+      const needle = ${JSON.stringify(preview.toLowerCase().replace(/\s+/g, " ").slice(0, 120))};
+      if (!needle) return null;
+      const normalize = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+      const turns = Array.from(document.querySelectorAll(${JSON.stringify(CONVERSATION_TURN_SELECTOR)}));
+      let matched = null;
+      for (const [index, node] of turns.entries()) {
+        const attr = (node.getAttribute('data-message-author-role') || node.getAttribute('data-turn') || node.dataset?.turn || '').toLowerCase();
+        const isUser = attr === 'user' || Boolean(node.querySelector('[data-message-author-role="user"]'));
+        if (!isUser) continue;
+        const text = normalize(node.innerText || node.textContent || '');
+        if (text.length > 0 && (text.includes(needle) || needle.includes(text.slice(0, needle.length)))) {
+          matched = index;
+        }
+      }
+      return matched;
+    })()`,
+        returnByValue: true,
+    });
+    return typeof result?.value === "number" ? result.value : null;
+}
+// biome-ignore lint/style/useNamingConvention: test-only export used in vitest suite
+export const __test__ = {
+    pickTarget,
+    extractConversationIdFromUrl,
+    buildConversationUrl,
+    openConversationFromSidebar,
+    readPromptPreviewTurnIndex,
+};

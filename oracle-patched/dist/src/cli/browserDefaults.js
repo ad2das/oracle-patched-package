@@ -1,0 +1,107 @@
+import { CHATGPT_URL } from "../browser/constants.js";
+import { normalizeChatgptUrl } from "../browser/utils.js";
+export function applyBrowserDefaultsFromConfig(options, config, getSource) {
+    const browser = config.browser;
+    if (!browser)
+        return;
+    const isUnset = (key) => {
+        const source = getSource(key);
+        return source === undefined || source === "default";
+    };
+    const attachRunningRequested = options.browserAttachRunning === true ||
+        (isUnset("browserAttachRunning") && browser.attachRunning === true);
+    const configuredChatgptUrl = browser.chatgptUrl ?? browser.url;
+    const cliChatgptSet = options.chatgptUrl !== undefined || options.browserUrl !== undefined;
+    if (isUnset("chatgptUrl") && !cliChatgptSet && configuredChatgptUrl !== undefined) {
+        options.chatgptUrl = normalizeChatgptUrl(configuredChatgptUrl ?? "", CHATGPT_URL);
+    }
+    if (!attachRunningRequested &&
+        isUnset("browserChromeProfile") &&
+        browser.chromeProfile !== undefined) {
+        options.browserChromeProfile = browser.chromeProfile ?? undefined;
+    }
+    if (isUnset("browserChromePath") && browser.chromePath !== undefined) {
+        options.browserChromePath = browser.chromePath ?? undefined;
+    }
+    if (!attachRunningRequested &&
+        isUnset("browserCookiePath") &&
+        browser.chromeCookiePath !== undefined) {
+        options.browserCookiePath = browser.chromeCookiePath ?? undefined;
+    }
+    if (isUnset("browserAttachRunning") && browser.attachRunning !== undefined) {
+        options.browserAttachRunning = browser.attachRunning;
+    }
+    if (isUnset("browserUrl") && options.browserUrl === undefined && browser.url !== undefined) {
+        options.browserUrl = browser.url;
+    }
+    if (isUnset("browserTimeout") && typeof browser.timeoutMs === "number") {
+        options.browserTimeout = String(browser.timeoutMs);
+    }
+    if (!attachRunningRequested && isUnset("browserPort") && typeof browser.debugPort === "number") {
+        options.browserPort = browser.debugPort;
+    }
+    if (isUnset("browserInputTimeout") && typeof browser.inputTimeoutMs === "number") {
+        options.browserInputTimeout = String(browser.inputTimeoutMs);
+    }
+    if (isUnset("browserRecheckDelay") && typeof browser.assistantRecheckDelayMs === "number") {
+        options.browserRecheckDelay = String(browser.assistantRecheckDelayMs);
+    }
+    if (isUnset("browserRecheckTimeout") && typeof browser.assistantRecheckTimeoutMs === "number") {
+        options.browserRecheckTimeout = String(browser.assistantRecheckTimeoutMs);
+    }
+    if (isUnset("browserReuseWait") && typeof browser.reuseChromeWaitMs === "number") {
+        options.browserReuseWait = String(browser.reuseChromeWaitMs);
+    }
+    if (isUnset("browserProfileLockTimeout") && typeof browser.profileLockTimeoutMs === "number") {
+        options.browserProfileLockTimeout = String(browser.profileLockTimeoutMs);
+    }
+    if (isUnset("browserMaxConcurrentTabs") && typeof browser.maxConcurrentTabs === "number") {
+        options.browserMaxConcurrentTabs = String(browser.maxConcurrentTabs);
+    }
+    if (isUnset("browserAutoReattachDelay") && typeof browser.autoReattachDelayMs === "number") {
+        options.browserAutoReattachDelay = String(browser.autoReattachDelayMs);
+    }
+    if (isUnset("browserAutoReattachInterval") &&
+        typeof browser.autoReattachIntervalMs === "number") {
+        options.browserAutoReattachInterval = String(browser.autoReattachIntervalMs);
+    }
+    if (isUnset("browserAutoReattachTimeout") && typeof browser.autoReattachTimeoutMs === "number") {
+        options.browserAutoReattachTimeout = String(browser.autoReattachTimeoutMs);
+    }
+    if (isUnset("browserCookieWait") && typeof browser.cookieSyncWaitMs === "number") {
+        options.browserCookieWait = String(browser.cookieSyncWaitMs);
+    }
+    if (isUnset("browserHeadless") && browser.headless !== undefined) {
+        options.browserHeadless = browser.headless;
+    }
+    if (!attachRunningRequested && isUnset("browserHideWindow") && browser.hideWindow !== undefined) {
+        options.browserHideWindow = browser.hideWindow;
+    }
+    if (!attachRunningRequested &&
+        isUnset("browserKeepBrowser") &&
+        browser.keepBrowser !== undefined) {
+        options.browserKeepBrowser = browser.keepBrowser;
+    }
+    if (isUnset("browserModelStrategy") && browser.modelStrategy !== undefined) {
+        options.browserModelStrategy = browser.modelStrategy;
+    }
+    if (isUnset("browserThinkingTime") && browser.thinkingTime !== undefined) {
+        options.browserThinkingTime = browser.thinkingTime;
+    }
+    if (isUnset("browserResearch") && browser.researchMode !== undefined) {
+        options.browserResearch = browser.researchMode;
+    }
+    if (isUnset("browserArchive") && browser.archiveConversations !== undefined) {
+        options.browserArchive = browser.archiveConversations;
+    }
+    if (!attachRunningRequested &&
+        isUnset("browserManualLogin") &&
+        browser.manualLogin !== undefined) {
+        options.browserManualLogin = browser.manualLogin;
+    }
+    if (!attachRunningRequested &&
+        isUnset("browserManualLoginProfileDir") &&
+        browser.manualLoginProfileDir !== undefined) {
+        options.browserManualLoginProfileDir = browser.manualLoginProfileDir;
+    }
+}

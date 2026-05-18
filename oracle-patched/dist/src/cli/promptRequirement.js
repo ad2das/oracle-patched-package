@@ -1,0 +1,19 @@
+/**
+ * Determine whether the CLI should enforce a prompt requirement based on raw args and options.
+ */
+export function shouldRequirePrompt(rawArgs, options) {
+    if (rawArgs.length === 0) {
+        return !options.prompt;
+    }
+    const firstArg = rawArgs[0];
+    const bypassPrompt = Boolean(options.session ||
+        options.execSession ||
+        options.status ||
+        options.debugHelp ||
+        options.route ||
+        options.preflight ||
+        firstArg === "status" ||
+        firstArg === "session");
+    const requiresPrompt = options.renderMarkdown || Boolean(options.preview) || Boolean(options.dryRun) || !bypassPrompt;
+    return requiresPrompt && !options.prompt;
+}
