@@ -84,7 +84,7 @@ async function main() {
       }
       const value = await cdpEvaluate(target.webSocketDebuggerUrl, `(() => {
         const text = document.body.innerText || "";
-        const generating = /\\b(Pro thinking|Finalizing answer|Thinking|Stop generating)\\b/i.test(text);
+        const generating = /\\b(Pro thinking|Finalizing answer|Thinking|Stop generating|I['’]m considering|I['’]m thinking|I also propose|I['’]ll|Still working|Working on)\\b/i.test(text);
         return {
           title: document.title,
           url: location.href,
