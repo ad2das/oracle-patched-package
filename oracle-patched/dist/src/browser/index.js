@@ -1,4 +1,4 @@
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
@@ -31,6 +31,40 @@ import { describeBrowserControlPlan, formatBrowserControlPlan } from "./controlP
 export { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "./constants.js";
 export { parseDuration, delay, normalizeChatgptUrl, isTemporaryChatUrl } from "./utils.js";
 export { formatThinkingLog, formatThinkingWaitingLog, buildThinkingStatusExpressionForTest, readThinkingStatusForTest, sanitizeThinkingText, startThinkingStatusMonitorForTest, } from "./actions/thinkingStatus.js";
+async function hasOtherRunningBrowserSessionsOnChrome(userDataDir, runtime, currentSessionId) {
+    if (!runtime?.chromePort && !runtime?.chromePid) {
+        return false;
+    }
+    const oracleHome = path.dirname(userDataDir);
+    const sessionsDir = path.join(oracleHome, "sessions");
+    const entries = await readdir(sessionsDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name === currentSessionId) {
+            continue;
+        }
+        const metaPath = path.join(sessionsDir, entry.name, "meta.json");
+        let meta;
+        try {
+            meta = JSON.parse(await readFile(metaPath, "utf8"));
+        }
+        catch {
+            continue;
+        }
+        if (meta.status !== "running" || meta.mode !== "browser") {
+            continue;
+        }
+        const otherRuntime = meta.browser?.runtime;
+        if (!otherRuntime?.promptSubmitted) {
+            continue;
+        }
+        const samePort = runtime.chromePort && otherRuntime.chromePort === runtime.chromePort;
+        const samePid = runtime.chromePid && otherRuntime.chromePid === runtime.chromePid;
+        if (samePort || samePid) {
+            return true;
+        }
+    }
+    return false;
+}
 function redactBrowserConfigForDebugLog(config) {
     const redacted = { ...config };
     if (Array.isArray(config.inlineCookies)) {
@@ -799,7 +833,7 @@ export async function runBrowserMode(options) {
                 // Scale timeout based on number of files: base 45s + 20s per additional file.
                 const baseTimeout = config.inputTimeoutMs ?? 30_000;
                 const perFileTimeout = 20_000;
-                const waitBudget = Math.max(baseTimeout, 45_000) + (submissionAttachments.length - 1) * perFileTimeout;
+                const waitBudget = Math.max(10 * 60_000, Math.max(baseTimeout, 45_000) + (submissionAttachments.length - 1) * perFileTimeout);
                 await waitForAttachmentCompletion(Runtime, waitBudget, attachmentNames, logger);
                 logger("All attachments uploaded");
             }
@@ -1436,6 +1470,13 @@ export async function runBrowserMode(options) {
             if (keepBrowserOpen) {
                 logger("[browser] Other ChatGPT tab leases still active; leaving shared Chrome running.");
             }
+            else if (await hasOtherRunningBrowserSessionsOnChrome(userDataDir, {
+                chromePid: chrome?.pid,
+                chromePort: chrome?.port,
+            }, options.sessionId).catch(() => false)) {
+                keepBrowserOpen = true;
+                logger("[browser] Other running Oracle browser sessions still reference this Chrome; leaving shared Chrome running.");
+            }
             else if (reusedChrome && !connectionClosedUnexpectedly) {
                 terminatedRecordedChrome = await terminateRecordedChromeForProfile(userDataDir, logger).catch(() => false);
             }
@@ -1919,7 +1960,7 @@ async function runRemoteBrowserMode(promptText, attachments, config, logger, opt
                 // Scale timeout based on number of files: base 30s + 15s per additional file
                 const baseTimeout = config.inputTimeoutMs ?? 30_000;
                 const perFileTimeout = 15_000;
-                const waitBudget = Math.max(baseTimeout, 30_000) + (submissionAttachments.length - 1) * perFileTimeout;
+                const waitBudget = Math.max(10 * 60_000, Math.max(baseTimeout, 30_000) + (submissionAttachments.length - 1) * perFileTimeout);
                 await waitForAttachmentCompletion(Runtime, waitBudget, attachmentNames, logger);
                 logger("All attachments uploaded");
             }

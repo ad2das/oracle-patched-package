@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import kleur from "kleur";
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { renderMarkdownAnsi } from "./markdownRenderer.js";
 import { formatFinishLine } from "../oracle/finishLine.js";
 import { sessionStore, wait } from "../sessionStore.js";
@@ -9,6 +10,7 @@ import { resumeBrowserSession } from "../browser/reattach.js";
 import { hasRecoverableChatGptConversation } from "../browser/reattachability.js";
 import { appendArtifacts, saveBrowserTranscriptArtifact, saveDeepResearchReportArtifact, } from "../browser/artifacts.js";
 import { estimateTokenCount } from "../browser/utils.js";
+import { collectChatGptTabs, sessionMatchesTab } from "../browser/liveTabs.js";
 import { formatSessionTableHeader, formatSessionTableRow, resolveSessionCost, } from "./sessionTable.js";
 import { abbreviateResponseId, buildResponseOwnerIndex, resolveSessionLineage, } from "./sessionLineage.js";
 import { formatSessionExecutionLabel } from "./sessionLifecycle.js";
@@ -32,6 +34,80 @@ function isProcessAlive(pid) {
         }
         return true;
     }
+}
+function discoverChromeDebugPorts() {
+    const ports = [];
+    try {
+        if (process.platform === "win32") {
+            const output = execFileSync("powershell.exe", [
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | Select-Object -ExpandProperty CommandLine",
+            ], { encoding: "utf8" });
+            for (const match of output.matchAll(/--remote-debugging-port=(\d+)/g)) {
+                ports.push(Number.parseInt(match[1], 10));
+            }
+        }
+        else {
+            const output = execFileSync("ps", ["-axo", "command"], { encoding: "utf8" });
+            for (const match of output.matchAll(/--remote-debugging-port=(\d+)/g)) {
+                ports.push(Number.parseInt(match[1], 10));
+            }
+        }
+    }
+    catch {
+        // Fall back to metadata-only reattach.
+    }
+    return [...new Set(ports.filter((port) => Number.isFinite(port) && port > 0))];
+}
+async function openConversationTab(port, url) {
+    const response = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, {
+        method: "PUT",
+    });
+    if (!response.ok) {
+        throw new Error(`DevTools new tab failed: HTTP ${response.status}`);
+    }
+    await wait(3000);
+}
+async function probeBrowserSessionDom(metadata) {
+    const runtime = metadata.browser?.runtime;
+    const ports = [
+        runtime?.chromePort,
+        ...discoverChromeDebugPorts(),
+    ].filter((port) => Number.isFinite(Number(port)) && Number(port) > 0)
+        .map((port) => Number(port));
+    const uniquePorts = [...new Set(ports)];
+    for (const port of uniquePorts) {
+        const tabs = await collectChatGptTabs({
+            host: runtime?.chromeHost ?? "127.0.0.1",
+            port,
+        }).catch(() => []);
+        const matched = tabs.find((tab) => sessionMatchesTab(metadata, tab));
+        if (matched) {
+            return { tab: matched, opened: false };
+        }
+    }
+    const tabUrl = runtime?.tabUrl;
+    if (!tabUrl || uniquePorts.length === 0) {
+        return null;
+    }
+    for (const port of uniquePorts) {
+        try {
+            await openConversationTab(port, tabUrl);
+            const tabs = await collectChatGptTabs({
+                host: runtime?.chromeHost ?? "127.0.0.1",
+                port,
+            }).catch(() => []);
+            const matched = tabs.find((tab) => sessionMatchesTab(metadata, tab));
+            if (matched) {
+                return { tab: matched, opened: true };
+            }
+        }
+        catch {
+            // Try the next live Chrome.
+        }
+    }
+    return null;
 }
 function formatBytes(bytes) {
     if (bytes < 1024)
@@ -160,10 +236,41 @@ export async function attachSession(sessionId, options) {
     const initialStatus = metadata.status;
     const wantsRender = Boolean(options?.renderMarkdown);
     const isVerbose = Boolean(process.env.ORACLE_VERBOSE_RENDER);
-    const runtime = metadata.browser?.runtime;
-    const controllerAlive = isProcessAlive(runtime?.controllerPid);
+    let runtime = metadata.browser?.runtime;
     const hasChromeDisconnect = metadata.response?.incompleteReason === "chrome-disconnected";
     const hasIncompleteCapture = metadata.response?.incompleteReason === "incomplete-capture";
+    if (metadata.mode === "browser" && metadata.status === "error" && hasChromeDisconnect) {
+        console.log(chalk.yellow("Checking live ChatGPT DOM before trusting the stored error state..."));
+        const probe = await probeBrowserSessionDom(metadata).catch(() => null);
+        if (probe?.tab) {
+            const tab = probe.tab;
+            console.log(chalk.yellow(`Live DOM check: state=${tab.state}; opened=${probe.opened ? "yes" : "no"}; url=${tab.url}`));
+            runtime = {
+                ...runtime,
+                chromeHost: tab.host ?? runtime?.chromeHost ?? "127.0.0.1",
+                chromePort: tab.port ?? runtime?.chromePort,
+                chromeTargetId: tab.targetId ?? runtime?.chromeTargetId,
+                tabUrl: tab.url ?? runtime?.tabUrl,
+                conversationId: tab.conversationId ?? runtime?.conversationId,
+                promptSubmitted: runtime?.promptSubmitted ?? true,
+            };
+            metadata = {
+                ...metadata,
+                status: tab.state === "running" ? "running" : metadata.status,
+                browser: {
+                    ...metadata.browser,
+                    runtime,
+                },
+                response: tab.state === "running"
+                    ? { status: "running", incompleteReason: "chrome-disconnected" }
+                    : metadata.response,
+            };
+        }
+        else {
+            console.log(chalk.yellow("Live DOM check: no matching ChatGPT tab or reopened conversation showed active output."));
+        }
+    }
+    const controllerAlive = isProcessAlive(runtime?.controllerPid);
     const statusAllowsReattach = metadata.status === "running" ||
         (metadata.status === "error" && (hasChromeDisconnect || hasIncompleteCapture));
     const hasFallbackSessionInfo = Boolean(runtime?.chromePort ||
