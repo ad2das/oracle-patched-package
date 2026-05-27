@@ -39,6 +39,37 @@ function readSessionMeta(id) {
   }
 }
 
+function writeJsonIfPossible(filePath, value) {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  } catch {
+    // Recovery reads should never fail just because state persistence failed.
+  }
+}
+
+function persistLiveState(output) {
+  const observedAt = new Date().toISOString();
+  const state = {
+    observedAt,
+    generating: Boolean(output.generating),
+    title: output.title,
+    url: output.url,
+    tabTitle: output.tabTitle,
+    tabUrl: output.tabUrl,
+    tabId: output.tabId,
+    port: output.port,
+    session: output.session,
+    sessionStatus: output.sessionStatus,
+    sessionError: output.sessionError,
+    length: output.length,
+  };
+  writeJsonIfPossible(path.join(oracleHomeDir(), "live-chatgpt-state.json"), state);
+  if (output.session) {
+    writeJsonIfPossible(path.join(oracleHomeDir(), "sessions", output.session, "live-state.json"), state);
+  }
+}
+
 function readSessionRuntime(id) {
   return readSessionMeta(id)?.browser?.runtime ?? null;
 }
@@ -186,6 +217,7 @@ async function main() {
         tabId: target.id,
         ...value,
       };
+      persistLiveState(output);
       if (jsonOnly) {
         console.log(JSON.stringify(output, null, 2));
       } else {
