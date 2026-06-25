@@ -50,7 +50,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
   - `node "<skill-folder>\\scripts\\run-oracle.mjs" status --hours 72`
 
 - Recover a live ChatGPT browser tab after CLI disconnect:
-  - `node "<skill-folder>\\scripts\\read-live-chatgpt.mjs" --title "Android Manga Preload Strategy" --tail 40000`
+  - `node "<skill-folder>\\scripts\\read-live-chatgpt.mjs" --session "<id>" --tail 40000`
 
 ## Usage Notes
 
@@ -58,6 +58,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Use `--browser-attachments always` when you need to prove real upload behavior.
 - Browser runs can take a long time; if a run detaches or times out, reattach to the stored session instead of re-running.
 - Do not treat `chrome-disconnected`, `Browser session ended`, `No live ChatGPT tab could be read`, or a session `error` status as proof that ChatGPT stopped generating or that no answer exists. If `read-live-chatgpt.mjs` has ever returned `generating=true` for the conversation, keep polling/recovering that same conversation until it returns `generating=false`, yields final answer text, or the user explicitly tells you to abandon it.
+- If a browser run times out, disconnects, or reports `error`, first run `scripts/run-oracle.mjs session <id> --render`. This can reopen the saved ChatGPT conversation, save the transcript artifact, and mark the session completed.
 - First check whether the Oracle Chrome process still exists and has a `--remote-debugging-port`; if so, read the live ChatGPT tab with `scripts/read-live-chatgpt.mjs`. If the recovered text still says `Pro thinking`, `Finalizing answer`, `Thinking`, or `Stop generating`, wait and poll the live tab instead of starting a new Oracle request.
 - Prefer the live-tab recovery script over launching another Oracle run when the user can see Chrome still generating. Starting another run can duplicate requests and confuse which answer should be used.
 - The wrapper refuses new browser runs when a recent live state/session log suggests generation may still be active. Override only for an intentional duplicate by setting `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.

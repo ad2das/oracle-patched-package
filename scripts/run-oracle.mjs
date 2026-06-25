@@ -126,6 +126,7 @@ if (
     console.error("Recover it first with:");
     if (active.session) {
       console.error(`  node "${join(scriptDir, "read-live-chatgpt.mjs")}" --session "${active.session}" --tail 40000`);
+      console.error(`  node "${join(scriptDir, "run-oracle.mjs")}" session "${active.session}" --render`);
     } else {
       console.error(`  node "${join(scriptDir, "read-live-chatgpt.mjs")}" --title "ChatGPT" --tail 40000`);
     }
