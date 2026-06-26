@@ -225,7 +225,8 @@ async function parseAssistantEvaluationResult(_Runtime, evaluation, _logger) {
         if (isAnswerNowPlaceholderText(normalized)) {
             return null;
         }
-        return { text, html, meta: { turnId, messageId } };
+        const turnIndex = typeof result.value.turnIndex === "number" ? result.value.turnIndex : undefined;
+        return { text, html, meta: { turnId, messageId, turnIndex } };
     }
     const fallbackText = typeof result.value === "string" ? cleanAssistantText(result.value) : "";
     if (!fallbackText) {
@@ -345,7 +346,13 @@ async function pollAssistantCompletion(Runtime, timeoutMs, minTurnIndex, expecte
 async function isStopButtonVisible(Runtime) {
     try {
         const { result } = await Runtime.evaluate({
-            expression: `Boolean(document.querySelector('${STOP_BUTTON_SELECTOR}'))`,
+            expression: `(() => {
+        if (document.querySelector('${STOP_BUTTON_SELECTOR}')) return true;
+        const labels = Array.from(document.querySelectorAll('button,[role="button"]'))
+          .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
+          .filter(Boolean);
+        return labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label));
+      })()`,
             returnByValue: true,
         });
         return Boolean(result?.value);
@@ -417,7 +424,11 @@ function normalizeAssistantSnapshot(snapshot) {
     return {
         text,
         html: snapshot?.html ?? undefined,
-        meta: { turnId: snapshot?.turnId ?? undefined, messageId: snapshot?.messageId ?? undefined },
+        meta: {
+            turnId: snapshot?.turnId ?? undefined,
+            messageId: snapshot?.messageId ?? undefined,
+            turnIndex: typeof snapshot?.turnIndex === "number" ? snapshot.turnIndex : undefined,
+        },
     };
 }
 function isGeneratedImageAssistantAnswer(answer) {
@@ -621,8 +632,18 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
     // Check if the last assistant turn has finished (scoped to avoid detecting old turns).
     const isLastAssistantTurnFinished = () => {
       const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+      let lastUserIndex = -1;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const role =
+          (turns[i].getAttribute('data-message-author-role') || turns[i].getAttribute('data-turn') || turns[i].dataset?.messageAuthorRole || turns[i].dataset?.turn || '').toLowerCase();
+        if (role === 'user' || turns[i].querySelector('[data-message-author-role="user"], [data-turn="user"]')) {
+          lastUserIndex = i;
+          break;
+        }
+      }
       let lastAssistantTurn = null;
       for (let i = turns.length - 1; i >= 0; i--) {
+        if (lastUserIndex >= 0 && i <= lastUserIndex) break;
         if (isAssistantTurn(turns[i])) {
           lastAssistantTurn = turns[i];
           break;
@@ -634,6 +655,14 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
       // Check for "Done" text in this turn's markdown
       const markdowns = lastAssistantTurn.querySelectorAll('.markdown');
       return Array.from(markdowns).some((n) => (n.textContent || '').trim() === 'Done');
+    };
+
+    const isGenerating = () => {
+      if (document.querySelector(STOP_SELECTOR)) return true;
+      const labels = Array.from(document.querySelectorAll('button,[role="button"]'))
+        .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
+        .filter(Boolean);
+      return labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label));
     };
 
     const waitForSettle = async (snapshot) => {
@@ -676,7 +705,7 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
         } else {
           stableCycles += 1;
         }
-        const stopVisible = Boolean(document.querySelector(STOP_SELECTOR));
+        const stopVisible = isGenerating();
         const finishedVisible = isLastAssistantTurnFinished();
 
         if (finishedVisible || (!stopVisible && stableCycles >= stableTarget)) {
@@ -742,8 +771,21 @@ function buildAssistantExtractor(functionName) {
     };
 
     const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+    let lastUserIndex = -1;
     for (let index = turns.length - 1; index >= 0; index -= 1) {
       const turn = turns[index];
+      const role =
+        (turn.getAttribute('data-message-author-role') || turn.getAttribute('data-turn') || turn.dataset?.messageAuthorRole || turn.dataset?.turn || '').toLowerCase();
+      if (role === 'user' || turn.querySelector('[data-message-author-role="user"], [data-turn="user"]')) {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      if (lastUserIndex >= 0 && index <= lastUserIndex) {
+        continue;
+      }
       if (!isAssistantTurn(turn)) {
         continue;
       }
@@ -827,6 +869,16 @@ function buildMarkdownFallbackExtractor(minTurnLiteral) {
     const CONVERSATION_SELECTOR = '${CONVERSATION_TURN_SELECTOR}';
     const turnNodes = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
     const hasTurns = turnNodes.length > 0;
+    let lastUserTurnIndex = -1;
+    for (let i = turnNodes.length - 1; i >= 0; i -= 1) {
+      const turn = turnNodes[i];
+      const role =
+        (turn.getAttribute('data-message-author-role') || turn.getAttribute('data-turn') || turn.dataset?.messageAuthorRole || turn.dataset?.turn || '').toLowerCase();
+      if (role === 'user' || turn.querySelector('[data-message-author-role="user"], [data-turn="user"]')) {
+        lastUserTurnIndex = i;
+        break;
+      }
+    }
     const resolveTurnIndex = (node) => {
       const turn = node?.closest?.(CONVERSATION_SELECTOR);
       if (!turn) return null;
@@ -834,10 +886,11 @@ function buildMarkdownFallbackExtractor(minTurnLiteral) {
       return idx >= 0 ? idx : null;
     };
     const isAfterMinTurn = (node) => {
-      if (__minTurn === null) return true;
       if (!hasTurns) return true;
       const idx = resolveTurnIndex(node);
-      return idx !== null && idx >= __minTurn;
+      if (idx === null) return false;
+      if (lastUserTurnIndex >= 0 && idx <= lastUserTurnIndex) return false;
+      return __minTurn === null || idx >= __minTurn;
     };
     const normalize = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
     const collectUserText = (scope) => {
@@ -959,8 +1012,28 @@ function buildCopyExpression(meta) {
         return Boolean(node.querySelector(ASSISTANT_SELECTOR) || node.querySelector('[data-testid*="assistant"]'));
       };
       const turns = Array.from(document.querySelectorAll(CONVERSATION_SELECTOR));
+      if (Number.isInteger(hint?.turnIndex) && hint.turnIndex >= 0 && turns[hint.turnIndex]) {
+        const turn = turns[hint.turnIndex];
+        if (isAssistantTurn(turn)) {
+          const button = turn.querySelector(BUTTON_SELECTOR);
+          if (button) {
+            return button;
+          }
+        }
+      }
+      let lastUserIndex = -1;
       for (let i = turns.length - 1; i >= 0; i -= 1) {
         const turn = turns[i];
+        const role =
+          (turn.getAttribute('data-message-author-role') || turn.getAttribute('data-turn') || turn.dataset?.messageAuthorRole || turn.dataset?.turn || '').toLowerCase();
+        if (role === 'user' || turn.querySelector('[data-message-author-role="user"], [data-turn="user"]')) {
+          lastUserIndex = i;
+          break;
+        }
+      }
+      for (let i = turns.length - 1; i >= 0; i -= 1) {
+        const turn = turns[i];
+        if (lastUserIndex >= 0 && i <= lastUserIndex) break;
         if (!isAssistantTurn(turn)) continue;
         const button = turn.querySelector(BUTTON_SELECTOR);
         if (button) {
