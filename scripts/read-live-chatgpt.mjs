@@ -246,6 +246,10 @@ async function openSessionTab(port, url) {
   return response.json();
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function buildDomProbeExpression(tail, needles = []) {
   const encodedNeedles = JSON.stringify(needles);
   return `(() => {
@@ -261,6 +265,13 @@ function buildDomProbeExpression(tail, needles = []) {
         const articles = [...document.querySelectorAll('article,[data-message-author-role],[data-turn]')]
           .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
+        const assistantMessages = [...document.querySelectorAll('[data-message-author-role="assistant"], [data-testid^="conversation-turn-"] .markdown, .markdown.prose, [class*=markdown][class*=prose]')]
+          .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
+          .filter((value) => value && !/^(Pro|Share|ChatGPT can make mistakes)/i.test(value));
+        const userMessages = [...document.querySelectorAll('[data-message-author-role="user"]')]
+          .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
+          .filter(Boolean);
+        const lastAssistantMessage = assistantMessages.at(-1) || "";
         return {
           title: document.title,
           url: location.href,
@@ -269,6 +280,10 @@ function buildDomProbeExpression(tail, needles = []) {
           generating: stopExists || thinkingText,
           stopExists,
           articleCount: articles.length,
+          assistantCount: assistantMessages.length,
+          userCount: userMessages.length,
+          conversationLoaded: articles.length > 0 || assistantMessages.length > 0 || userMessages.length > 0,
+          lastAssistantMessage: lastAssistantMessage.slice(-${Math.max(1000, tail)}),
           lastArticle: (articles.at(-1) || '').slice(-${Math.max(1000, tail)}),
           text: text.slice(-${Math.max(1000, tail)})
         };
@@ -318,13 +333,25 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
 }
 
 async function readTarget({ target, port, sessionMeta, sessionRuntime, needles, opened }) {
-  const value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars, needles));
-  const sessionMatch = sessionMatchEvidence({
-    target,
-    value,
-    meta: sessionMeta,
-    runtime: sessionRuntime,
-  });
+  let value = null;
+  let sessionMatch = null;
+  const startedAt = Date.now();
+  const maxWaitMs = opened ? 30000 : 8000;
+  do {
+    value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars, needles));
+    sessionMatch = sessionMatchEvidence({
+      target,
+      value,
+      meta: sessionMeta,
+      runtime: sessionRuntime,
+    });
+    const hasConversationContent =
+      value?.conversationLoaded ||
+      value?.promptMatch ||
+      Number(value?.length ?? 0) > 3000;
+    if (!sessionId || !sessionMatch.matched || hasConversationContent) break;
+    await wait(1000);
+  } while (Date.now() - startedAt < maxWaitMs);
   return {
     output: {
       port,
