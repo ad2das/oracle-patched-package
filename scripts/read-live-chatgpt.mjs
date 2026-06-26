@@ -192,7 +192,8 @@ function buildDomProbeExpression(tail) {
           .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
         const stopExists = labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label));
-        const thinkingText = /\\b(Pro thinking|Finalizing answer|Thinking|I['’]m considering|I['’]m thinking|Still working|Working on)\\b|생각 중|응답 생성/i.test(text);
+        const stoppedThinking = /\\bStopped thinking\\b/i.test(text);
+        const thinkingText = !stoppedThinking && /\\b(Pro thinking|Finalizing answer|Thinking|I['’]m considering|I['’]m thinking|Still working|Working on)\\b|생각 중|응답 생성/i.test(text);
         const articles = [...document.querySelectorAll('article,[data-message-author-role],[data-turn]')]
           .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
