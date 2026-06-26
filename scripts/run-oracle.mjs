@@ -82,6 +82,19 @@ function isProcessAlive(pid) {
   return probe.status === 0;
 }
 
+function isLocalPortOpen(port) {
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort <= 0) return false;
+  const probe = spawnSync(
+    process.platform === "win32" ? "powershell.exe" : "sh",
+    process.platform === "win32"
+      ? ["-NoProfile", "-Command", `$client = New-Object Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1', ${numericPort}); $client.Close(); exit 0 } catch { exit 1 }`]
+      : ["-c", `nc -z 127.0.0.1 ${numericPort}`],
+    { stdio: "ignore" },
+  );
+  return probe.status === 0;
+}
+
 function reconcileNotSubmittedBrowserSessions() {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const sessionsDir = join(oracleHome, "sessions");
@@ -157,9 +170,11 @@ function findActiveBrowserRecoveryState() {
   const maxAgeMs = Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000);
   const liveState = readJson(join(oracleHome, "live-chatgpt-state.json"));
   const liveStateMeta = readSessionMeta(oracleHome, liveState?.session);
+  const liveStatePortStillOpen = isLocalPortOpen(liveState?.port);
   if (
     liveState?.generating &&
     (!isTerminalSession(liveStateMeta) || hasRecoverableGeneratingConversation(liveState, liveStateMeta)) &&
+    (!isTerminalSession(liveStateMeta) || liveStatePortStillOpen) &&
     recentEnough(liveState.observedAt, maxAgeMs)
   ) {
     return {
