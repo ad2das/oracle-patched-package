@@ -197,6 +197,40 @@ function verifyLatestBrowserSubmissionAfterFailure() {
   };
 }
 
+function submitLiveChatGptSession(sessionId) {
+  if (!sessionId) return { ok: false, reason: "no session id" };
+  const result = spawnSync(process.execPath, [
+    join(scriptDir, "submit-live-chatgpt.mjs"),
+    "--session",
+    sessionId,
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: process.env,
+  });
+  let parsed = null;
+  try {
+    parsed = result.stdout.trim() ? JSON.parse(result.stdout) : null;
+  } catch (error) {
+    return {
+      ok: false,
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      parseError: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const url = parsed?.probe?.url || parsed?.submitted?.url;
+  return {
+    ok: result.status === 0 && Boolean(parsed?.submitted?.submitted) && isChatGptConversationUrl(url),
+    status: result.status,
+    submitted: parsed?.submitted,
+    probe: parsed?.probe,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
 function writeJson(filePath, value) {
   writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -461,7 +495,21 @@ if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
   if (verification.state === "submitted") {
     console.error("[oracle-wrapper] The browser command failed, but the prompt appears submitted. Do not retry blindly; recover/read this session first.");
   } else if (verification.state === "not_submitted") {
-    console.error("[oracle-wrapper] The prompt appears not submitted after live verification. It is safe to retry this request.");
+    console.error("[oracle-wrapper] The prompt appears not submitted after live verification. Attempting automatic live-submit recovery.");
+    const recovery = submitLiveChatGptSession(verification.session);
+    console.error(`[oracle-wrapper] live-submit recovery result: ${JSON.stringify({
+      ok: recovery.ok,
+      status: recovery.status,
+      submitted: recovery.submitted,
+      probe: recovery.probe,
+      stderr: recovery.stderr,
+      parseError: recovery.parseError,
+    })}`);
+    if (recovery.ok) {
+      console.error("[oracle-wrapper] The prompt was submitted by recovery. Do not start a duplicate request; read/recover this session for the answer.");
+      process.exit(0);
+    }
+    console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. It is safe to retry this request.");
   } else {
     console.error("[oracle-wrapper] Submission state is unknown. Inspect the live browser/session before retrying.");
   }

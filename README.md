@@ -10,6 +10,7 @@ Changes made:
 - ChatGPT model selection accepts current visible labels such as `Instant`, `Thinking Heavy`, and `Thinking Extended` for GPT-5.2 browser runs.
 - `read-live-chatgpt.mjs` records live ChatGPT state, and `run-oracle.mjs` blocks accidental duplicate browser submissions only when a current live read confirms ChatGPT is still generating.
 - The wrapper ignores stale, unrelated, terminal, or unreadable live-state/session-log evidence instead of blocking new browser submissions on old `generating=true` records.
+- When a browser run fails and live verification proves the prompt was not submitted, the wrapper automatically invokes `submit-live-chatgpt.mjs` once on the same session. If that recovery creates a ChatGPT conversation URL, the wrapper exits successfully so callers recover that session instead of starting a duplicate.
 - Completed, errored, or cancelled sessions are excluded from that duplicate guard even if an older recovery state still says `generating=true`.
 - `scripts/read-live-chatgpt.mjs` can inspect an existing ChatGPT browser tab by session, persist recovery state, and show the answer tail after a CLI disconnect.
 
@@ -18,7 +19,7 @@ Recovery policy:
 - Do not treat `chrome-disconnected`, `Browser session ended`, `No live ChatGPT tab could be read`, or session `error` as final failure.
 - First recover with `node scripts/run-oracle.mjs session <id> --render`.
 - If the conversation is still live, inspect it with `node scripts/read-live-chatgpt.mjs --session <id> --tail 40000`.
-- Start a duplicate browser run only when a current live read confirms the earlier conversation is still generating or when intentionally overridden with `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
+- Start a duplicate browser run only when a current live read and automatic submit recovery cannot produce a submitted conversation, or when intentionally overridden with `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
 
 Validation performed:
 
