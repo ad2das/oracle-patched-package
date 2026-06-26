@@ -26,6 +26,36 @@ import { estimateTokenCount } from "../browser/utils.js";
 import { formatElapsed } from "../oracle/format.js";
 const isTty = process.stdout.isTTY;
 const dim = (text) => (isTty ? kleur.dim(text) : text);
+const PARTIAL_BROWSER_CAPTURE_ERROR = "oracle-partial-browser-capture";
+function reviewPromptNeedsFullAnswer(runOptions) {
+    const prompt = String(runOptions.prompt ?? "").toLowerCase();
+    const files = Array.isArray(runOptions.file) ? runOptions.file : runOptions.file ? [runOptions.file] : [];
+    if (files.length === 0) {
+        return false;
+    }
+    return /review|audit|inspect|check|fix|quality|plan|검토|리뷰|검사|수정|고쳐|품질|계획|완벽/.test(prompt);
+}
+function partialBrowserCaptureReason(runOptions, answerText) {
+    if (!reviewPromptNeedsFullAnswer(runOptions)) {
+        return null;
+    }
+    const minChars = Number(process.env.ORACLE_MIN_REVIEW_ANSWER_CHARS || 1200);
+    const text = String(answerText ?? "").trim();
+    if (text.length >= minChars) {
+        return null;
+    }
+    return `Browser answer capture is suspiciously short for a file-backed review prompt (${text.length} chars, minimum ${minChars}). Treating it as incomplete instead of completed.`;
+}
+function createPartialBrowserCaptureError(message, runtime) {
+    const error = new Error(message);
+    error.code = PARTIAL_BROWSER_CAPTURE_ERROR;
+    error.partialBrowserCapture = true;
+    error.runtime = runtime;
+    return error;
+}
+function isPartialBrowserCaptureError(error) {
+    return Boolean(error && typeof error === "object" && error.code === PARTIAL_BROWSER_CAPTURE_ERROR);
+}
 export async function performSessionRun({ sessionMeta, runOptions, mode, browserConfig, cwd, log, write, version, notifications, browserDeps, muteStdout = false, }) {
     const writeInline = (chunk) => {
         // Keep session logs intact while still echoing inline output to the user.
@@ -66,6 +96,10 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
                 cwd,
                 log,
             }, runnerDeps);
+            const partialReason = partialBrowserCaptureReason(runOptions, result.answerText ?? "");
+            if (partialReason) {
+                throw createPartialBrowserCaptureError(partialReason, result.runtime);
+            }
             if (modelForStatus) {
                 await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
                     status: "completed",
@@ -388,6 +422,31 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             userError.details?.stage === "assistant-timeout";
         const cloudflareChallenge = userError?.category === "browser-automation" &&
             userError.details?.stage === "cloudflare-challenge";
+        if (isPartialBrowserCaptureError(error) && mode === "browser") {
+            const runtime = error.runtime ?? sessionMeta.browser?.runtime;
+            log(dim("Captured answer looked incomplete; keeping session running for reattach instead of marking completed."));
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "running",
+                    completedAt: undefined,
+                    response: { status: "running", incompleteReason: "partial-browser-capture" },
+                });
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: "running",
+                completedAt: undefined,
+                errorMessage: message,
+                mode,
+                browser: {
+                    config: browserConfig,
+                    runtime,
+                },
+                response: { status: "running", incompleteReason: "partial-browser-capture" },
+                error: undefined,
+            });
+            log(dim(`Reattach later with: oracle session ${sessionMeta.id} --render`));
+            return;
+        }
         if (connectionLost && mode === "browser") {
             const runtime = userError.details
                 ?.runtime;
@@ -839,6 +898,11 @@ async function autoReattachUntilComplete({ sessionMeta, runtime, browserConfig, 
                 promptPreview: sessionMeta.promptPreview,
             });
             const answerText = result.answerMarkdown || result.answerText || "";
+            const partialReason = partialBrowserCaptureReason(runOptions, answerText);
+            if (partialReason) {
+                log(dim(`[auto-reattach] ${partialReason}`));
+                throw createPartialBrowserCaptureError(partialReason, runtime);
+            }
             const outputTokens = estimateTokenCount(answerText);
             const artifacts = await ensureSessionArtifacts({
                 sessionId: sessionMeta.id,
