@@ -36,6 +36,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Browser sessions persist the fully assembled ChatGPT composer prompt before attachment upload begins, so a file-upload timeout can be live-submitted or retried without losing the prompt.
 - Attachment readiness waits are capped by `ORACLE_ATTACHMENT_READY_TIMEOUT_MS` (default 120000 ms) instead of waiting many minutes with files attached and an empty composer.
 - Browser failures that verify as `not_submitted` and cannot be live-submitted automatically retry the original Oracle CLI command once.
+- Session-scoped live recovery rejects unrelated ChatGPT tabs unless they match the requested Oracle session by Chrome target id, conversation id/URL, persisted live-state URL, or the original prompt fingerprint.
 
 ## Recommended Commands
 
@@ -73,7 +74,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Do not treat `Attachments did not finish uploading before timeout` as proof that the prompt was not submitted. First inspect the actual ChatGPT tab/conversation; files may be attached and the assistant may already be generating.
 - If a browser run times out, disconnects, or reports `error`, first run `scripts/run-oracle.mjs session <id> --render`. This can reopen the saved ChatGPT conversation, save the transcript artifact, and mark the session completed.
 - For browser review/check/audit prompts, rely on the latest assistant turn after the latest user prompt. If the transcript does not match the actual ChatGPT conversation, recover the same session with `session <id> --render` or `read-live-chatgpt.mjs --session <id>` and verify the page before using the artifact.
-- First check whether the Oracle Chrome process still exists and has a `--remote-debugging-port`; if so, read the live ChatGPT tab with `scripts/read-live-chatgpt.mjs`. If the recovered text still says `Pro thinking`, `Finalizing answer`, `Thinking`, or `Stop generating`, wait and poll the live tab instead of starting a new Oracle request.
+- First check whether the Oracle Chrome process still exists and has a `--remote-debugging-port`; if so, read the live ChatGPT tab with `scripts/read-live-chatgpt.mjs --session <id>`. Treat a failed session-scoped read as inconclusive; do not substitute a different visible ChatGPT tab unless it has explicit session evidence. If the recovered text still says `Pro thinking`, `Finalizing answer`, `Thinking`, or `Stop generating`, wait and poll the live tab instead of starting a new Oracle request.
 - Prefer the live-tab recovery script over launching another Oracle run when the user can see Chrome still generating. Starting another run can duplicate requests and confuse which answer should be used.
 - The wrapper refuses new browser runs only when a recent live state/session log can be verified against an open local Chrome debugging port and a currently readable ChatGPT conversation that is still generating. Terminal, stale, unrelated, or unreadable sessions are not treated as active just because an older recovery read once saw `generating=true`. Override only for an intentional duplicate by setting `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
 - Treat Oracle output as advisory and verify against the repo and tests.

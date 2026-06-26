@@ -142,6 +142,32 @@ function readSessionRuntime(id) {
   return readSessionMeta(id)?.browser?.runtime ?? null;
 }
 
+function normalizeText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function sessionPrompt(meta) {
+  return normalizeText(
+    meta?.browser?.preparedSubmission?.prompt ||
+    meta?.options?.preparedSubmission?.prompt ||
+    meta?.options?.prompt ||
+    meta?.prompt ||
+    ""
+  );
+}
+
+function promptNeedles(meta) {
+  const prompt = sessionPrompt(meta);
+  if (!prompt) return [];
+  const needles = [];
+  if (prompt.length >= 80) needles.push(prompt.slice(0, 160));
+  for (const line of prompt.split(/\n+/).map(normalizeText)) {
+    if (line.length >= 80) needles.push(line.slice(0, 160));
+    if (needles.length >= 4) break;
+  }
+  return unique(needles.map(normalizeText).filter((item) => item.length >= 40));
+}
+
 function discoverPorts() {
   const sessionRuntime = readSessionRuntime(sessionId);
   if (explicitPort) return unique([explicitPort, sessionRuntime?.chromePort && String(sessionRuntime.chromePort)]);
@@ -220,9 +246,12 @@ async function openSessionTab(port, url) {
   return response.json();
 }
 
-function buildDomProbeExpression(tail) {
+function buildDomProbeExpression(tail, needles = []) {
+  const encodedNeedles = JSON.stringify(needles);
   return `(() => {
         const text = document.body.innerText || "";
+        const normalizedText = text.replace(/\\s+/g, ' ').trim();
+        const promptNeedles = ${encodedNeedles};
         const labels = [...document.querySelectorAll('button,[role="button"]')]
           .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
@@ -236,6 +265,7 @@ function buildDomProbeExpression(tail) {
           title: document.title,
           url: location.href,
           length: text.length,
+          promptMatch: promptNeedles.some((needle) => normalizedText.includes(needle)),
           generating: stopExists || thinkingText,
           stopExists,
           articleCount: articles.length,
@@ -245,11 +275,54 @@ function buildDomProbeExpression(tail) {
       })()`;
 }
 
+function sessionMatchEvidence({ target, value, meta, runtime }) {
+  if (!sessionId) return { matched: true, reason: "no session filter" };
+  const targetUrl = String(target?.url ?? "");
+  const valueUrl = String(value?.url ?? "");
+  const urls = `${targetUrl}\n${valueUrl}`;
+  if (runtime?.chromeTargetId && target?.id === runtime.chromeTargetId) {
+    return { matched: true, reason: "chromeTargetId" };
+  }
+  if (runtime?.conversationId && urls.includes(runtime.conversationId)) {
+    return { matched: true, reason: "conversationId" };
+  }
+  if (runtime?.tabUrl && (targetUrl === runtime.tabUrl || valueUrl === runtime.tabUrl)) {
+    return { matched: true, reason: "tabUrl" };
+  }
+  const liveState = readJson(path.join(oracleHomeDir(), "sessions", sessionId, "live-state.json"));
+  const liveUrl = String(liveState?.url || liveState?.tabUrl || "");
+  if (liveUrl && (targetUrl === liveUrl || valueUrl === liveUrl)) {
+    return { matched: true, reason: "liveStateUrl" };
+  }
+  if (value?.promptMatch) {
+    return { matched: true, reason: "promptFingerprint" };
+  }
+  return {
+    matched: false,
+    reason: "no session-specific evidence",
+    expected: {
+      chromeTargetId: runtime?.chromeTargetId,
+      conversationId: runtime?.conversationId,
+      tabUrl: runtime?.tabUrl,
+      promptNeedles: promptNeedles(meta).length,
+    },
+    actual: {
+      tabId: target?.id,
+      tabTitle: target?.title,
+      tabUrl: targetUrl,
+      url: valueUrl,
+      title: value?.title,
+      promptMatch: Boolean(value?.promptMatch),
+    },
+  };
+}
+
 async function main() {
   const ports = discoverPorts();
   const sessionMeta = readSessionMeta(sessionId);
   const sessionRuntime = sessionMeta?.browser?.runtime ?? null;
   const sessionTabUrl = sessionRuntime?.tabUrl;
+  const needles = promptNeedles(sessionMeta);
   const attempts = [];
   for (const port of ports) {
     try {
@@ -273,12 +346,29 @@ async function main() {
         });
         continue;
       }
-      const value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars));
+      const value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars, needles));
+      const sessionMatch = sessionMatchEvidence({
+        target,
+        value,
+        meta: sessionMeta,
+        runtime: sessionRuntime,
+      });
+      if (!sessionMatch.matched) {
+        attempts.push({
+          port,
+          error: "matched ChatGPT tab does not belong to requested Oracle session",
+          session: sessionId,
+          sessionMatch,
+          tabs: tabs.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url })).slice(0, 10),
+        });
+        continue;
+      }
       const output = {
         port,
         session: sessionId,
         sessionStatus: sessionMeta?.status,
         sessionError: sessionMeta?.errorMessage,
+        sessionMatch,
         opened,
         tabTitle: target.title,
         tabUrl: target.url,
