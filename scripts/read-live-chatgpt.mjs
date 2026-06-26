@@ -39,6 +39,10 @@ function readSessionMeta(id) {
   }
 }
 
+function isTerminalSession(meta) {
+  return meta?.status === "completed" || meta?.status === "error" || meta?.status === "cancelled";
+}
+
 function writeJsonIfPossible(filePath, value) {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -50,9 +54,11 @@ function writeJsonIfPossible(filePath, value) {
 
 function persistLiveState(output) {
   const observedAt = new Date().toISOString();
+  const sessionMeta = readSessionMeta(output.session);
+  const generating = isTerminalSession(sessionMeta) ? false : Boolean(output.generating);
   const state = {
     observedAt,
-    generating: Boolean(output.generating),
+    generating,
     title: output.title,
     url: output.url,
     tabTitle: output.tabTitle,
@@ -60,7 +66,7 @@ function persistLiveState(output) {
     tabId: output.tabId,
     port: output.port,
     session: output.session,
-    sessionStatus: output.sessionStatus,
+    sessionStatus: sessionMeta?.status ?? output.sessionStatus,
     sessionError: output.sessionError,
     length: output.length,
   };

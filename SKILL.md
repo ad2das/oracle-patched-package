@@ -28,6 +28,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Commit verification accepts uploaded-attachment submissions when the composer clears and ChatGPT moves into conversation or response state.
 - Model selection accepts current ChatGPT labels such as `Instant`, `Thinking Heavy`, and `Thinking Extended` for GPT-5.2 browser runs.
 - Browser duplicate-run guard blocks a new browser submission when a recent session or live recovery check indicates ChatGPT may still be generating.
+- Browser duplicate-run guard ignores stale live-state and log evidence for sessions already marked `completed`, `error`, or `cancelled`.
 - ChatGPT browser capture targets the latest assistant turn after the latest user prompt and waits for real completion controls before saving a transcript.
 
 ## Recommended Commands
@@ -63,5 +64,5 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - For browser review/check/audit prompts, rely on the latest assistant turn after the latest user prompt. If the transcript does not match the actual ChatGPT conversation, recover the same session with `session <id> --render` or `read-live-chatgpt.mjs --session <id>` and verify the page before using the artifact.
 - First check whether the Oracle Chrome process still exists and has a `--remote-debugging-port`; if so, read the live ChatGPT tab with `scripts/read-live-chatgpt.mjs`. If the recovered text still says `Pro thinking`, `Finalizing answer`, `Thinking`, or `Stop generating`, wait and poll the live tab instead of starting a new Oracle request.
 - Prefer the live-tab recovery script over launching another Oracle run when the user can see Chrome still generating. Starting another run can duplicate requests and confuse which answer should be used.
-- The wrapper refuses new browser runs when a recent live state/session log suggests generation may still be active. Override only for an intentional duplicate by setting `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
+- The wrapper refuses new browser runs when a recent live state/session log suggests generation may still be active, but terminal sessions are not treated as active just because an older recovery read once saw `generating=true`. Override only for an intentional duplicate by setting `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
 - Treat Oracle output as advisory and verify against the repo and tests.

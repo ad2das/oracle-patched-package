@@ -10,6 +10,7 @@ Changes made:
 - ChatGPT model selection accepts current visible labels such as `Instant`, `Thinking Heavy`, and `Thinking Extended` for GPT-5.2 browser runs.
 - `read-live-chatgpt.mjs` records live ChatGPT state, and `run-oracle.mjs` blocks accidental duplicate browser submissions when a recent session may still be generating.
 - The wrapper blocks duplicate browser submissions when a recent live-state or session log indicates ChatGPT may still be generating.
+- Completed, errored, or cancelled sessions are excluded from that duplicate guard even if an older recovery state still says `generating=true`.
 - `scripts/read-live-chatgpt.mjs` can inspect an existing ChatGPT browser tab by session, persist recovery state, and show the answer tail after a CLI disconnect.
 
 Recovery policy:

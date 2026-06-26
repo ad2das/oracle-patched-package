@@ -43,11 +43,21 @@ function recentEnough(value, maxAgeMs) {
   return Number.isFinite(timestamp) && Date.now() - timestamp <= maxAgeMs;
 }
 
+function isTerminalSession(meta) {
+  return meta?.status === "completed" || meta?.status === "error" || meta?.status === "cancelled";
+}
+
+function readSessionMeta(oracleHome, sessionId) {
+  if (!sessionId) return null;
+  return readJson(join(oracleHome, "sessions", sessionId, "meta.json"));
+}
+
 function findActiveBrowserRecoveryState() {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const maxAgeMs = Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000);
   const liveState = readJson(join(oracleHome, "live-chatgpt-state.json"));
-  if (liveState?.generating && recentEnough(liveState.observedAt, maxAgeMs)) {
+  const liveStateMeta = readSessionMeta(oracleHome, liveState?.session);
+  if (liveState?.generating && !isTerminalSession(liveStateMeta) && recentEnough(liveState.observedAt, maxAgeMs)) {
     return {
       reason: "read-live-chatgpt previously observed generating=true",
       session: liveState.session,
@@ -66,6 +76,9 @@ function findActiveBrowserRecoveryState() {
     } catch {
       continue;
     }
+    const meta = readSessionMeta(oracleHome, sessionId);
+    if (isTerminalSession(meta)) continue;
+
     const sessionLiveState = readJson(join(sessionDir, "live-state.json"));
     if (sessionLiveState?.generating && recentEnough(sessionLiveState.observedAt, maxAgeMs)) {
       return {
@@ -77,8 +90,6 @@ function findActiveBrowserRecoveryState() {
       };
     }
 
-    const meta = readJson(join(sessionDir, "meta.json"));
-    if (meta?.status === "completed") continue;
     if (meta?.status === "running" && (meta.mode === "browser" || meta.engine === "browser")) {
       return {
         reason: "stored browser session is still running",
