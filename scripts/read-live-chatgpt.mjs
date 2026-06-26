@@ -71,9 +71,11 @@ function persistLiveState(output) {
 }
 
 function clearLiveStateAfterFailedRead(attempts) {
+  const sessionMeta = readSessionMeta(sessionId);
+  const sessionStillRunning = sessionMeta?.status === "running";
   const state = {
     observedAt: new Date().toISOString(),
-    generating: false,
+    generating: sessionStillRunning,
     title: titleFilter,
     url: null,
     tabTitle: null,
@@ -81,8 +83,10 @@ function clearLiveStateAfterFailedRead(attempts) {
     tabId: null,
     port: explicitPort,
     session: sessionId,
-    sessionStatus: readSessionMeta(sessionId)?.status,
-    sessionError: "No live ChatGPT tab could be read",
+    sessionStatus: sessionMeta?.status,
+    sessionError: sessionStillRunning
+      ? "No live ChatGPT tab could be read; session is still running and must be recovered with session --render"
+      : "No live ChatGPT tab could be read",
     length: 0,
     attempts,
   };
