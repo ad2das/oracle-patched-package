@@ -42,6 +42,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - If a matched browser session completed despite a CLI failure/interruption, the wrapper renders `session <id> --render` immediately to recover the answer.
 - Long review-style browser runs that complete with a suspiciously tiny answer are rejected after rendering the transcript, so callers do not treat outputs like `I` as valid reviews.
 - Live ChatGPT recovery waits for conversation DOM content after reopening a saved session URL and reads current assistant turns from ChatGPT's role/markdown nodes, so loaded answers are not misclassified as missing when `article` elements are absent.
+- Browser recovery treats recent ChatGPT generation logs as submitted/recoverable even when Chrome or the DevTools port disappeared, because the server-side conversation may still be generating or may have completed after local Chrome disconnected.
 
 ## Recommended Commands
 

@@ -153,6 +153,27 @@ function hasSubmittedLogEvidence(sessionDir) {
   return /ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true|Waiting for ChatGPT response/i.test(logText);
 }
 
+function submittedLogObservedAt(sessionDir, maxAgeMs = Number.POSITIVE_INFINITY) {
+  let latest = 0;
+  for (const filePath of [
+    join(sessionDir, "output.log"),
+    join(sessionDir, "models", "gpt-5.5-pro.log"),
+    join(sessionDir, "models", "gpt-5.2-instant.log"),
+  ]) {
+    try {
+      const stat = statSync(filePath);
+      if (Date.now() - stat.mtimeMs > maxAgeMs) continue;
+      const tail = readFileSync(filePath, "utf8").slice(-12000);
+      if (/ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true|Waiting for ChatGPT response/i.test(tail)) {
+        latest = Math.max(latest, stat.mtimeMs);
+      }
+    } catch {
+      // Missing logs are normal.
+    }
+  }
+  return latest ? new Date(latest).toISOString() : null;
+}
+
 function readLiveSessionJson(sessionId) {
   const result = spawnSync(process.execPath, [
     join(scriptDir, "read-live-chatgpt.mjs"),
@@ -409,6 +430,22 @@ function confirmedActiveGeneratingState(state, meta, sessionId) {
   };
 }
 
+function recoverableDisconnectedGeneratingState(state, meta, sessionDir) {
+  if (!state?.generating || !recentEnough(state.observedAt, Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000))) {
+    return null;
+  }
+  const stateUrl = state.url || state.tabUrl;
+  const hasConversationUrl = isChatGptConversationUrl(stateUrl);
+  const hasLogEvidence = sessionDir ? Boolean(submittedLogObservedAt(sessionDir, Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000))) : false;
+  if (!hasConversationUrl && !hasLogEvidence) return null;
+  if (isTerminalSession(meta) && !hasRecoverableGeneratingConversation(state, meta) && !hasLogEvidence) return null;
+  return {
+    url: stateUrl,
+    title: state.title || state.tabTitle || meta?.options?.slug || meta?.promptPreview,
+    observedAt: state.observedAt,
+  };
+}
+
 function reconcileNotSubmittedBrowserSessions() {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const sessionsDir = join(oracleHome, "sessions");
@@ -495,6 +532,17 @@ function findActiveBrowserRecoveryState() {
       observedAt: confirmedLiveState.observedAt,
     };
   }
+  const liveStateSessionDir = liveState?.session ? join(oracleHome, "sessions", liveState.session) : null;
+  const disconnectedLiveState = recoverableDisconnectedGeneratingState(liveState, liveStateMeta, liveStateSessionDir);
+  if (disconnectedLiveState) {
+    return {
+      reason: "ChatGPT generation evidence is preserved even though Chrome is no longer reachable",
+      session: liveState.session,
+      title: disconnectedLiveState.title,
+      url: disconnectedLiveState.url,
+      observedAt: disconnectedLiveState.observedAt,
+    };
+  }
 
   const sessionsDir = join(oracleHome, "sessions");
   if (!existsSync(sessionsDir)) return null;
@@ -517,6 +565,16 @@ function findActiveBrowserRecoveryState() {
         observedAt: confirmedSessionLiveState.observedAt,
       };
     }
+    const disconnectedSessionState = recoverableDisconnectedGeneratingState(sessionLiveState, meta, sessionDir);
+    if (disconnectedSessionState) {
+      return {
+        reason: "session has preserved ChatGPT generation evidence even though Chrome is no longer reachable",
+        session: sessionId,
+        title: disconnectedSessionState.title,
+        url: disconnectedSessionState.url,
+        observedAt: disconnectedSessionState.observedAt,
+      };
+    }
 
     if (isTerminalSession(meta)) continue;
 
@@ -529,15 +587,18 @@ function findActiveBrowserRecoveryState() {
       if (liveRead?.ok && !liveRead.value?.generating) {
         continue;
       }
-      if (!controllerAlive && !(liveRead?.ok && liveRead.value?.generating && isChatGptConversationUrl(liveUrl))) {
+      const logObservedAt = submittedLogObservedAt(sessionDir, maxAgeMs);
+      if (!controllerAlive && !(liveRead?.ok && liveRead.value?.generating && isChatGptConversationUrl(liveUrl)) && !logObservedAt) {
         continue;
       }
       return {
-        reason: "stored browser session is still running",
+        reason: logObservedAt && !controllerAlive && !chromePortOpen
+          ? "stored browser session has submitted ChatGPT generation evidence but Chrome is no longer reachable"
+          : "stored browser session is still running",
         session: sessionId,
         title: meta.options?.slug || meta.promptPreview,
-        url: meta.browser?.runtime?.tabUrl,
-        observedAt: meta.updatedAt || meta.createdAt,
+        url: liveUrl || meta.browser?.runtime?.tabUrl,
+        observedAt: logObservedAt || meta.updatedAt || meta.createdAt,
       };
     }
 
@@ -548,9 +609,8 @@ function findActiveBrowserRecoveryState() {
       const logTail = readFileSync(logPath, "utf8").slice(-12000);
       if (/ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true/i.test(logTail)) {
         const runtime = meta?.browser?.runtime;
-        if (!isProcessAlive(runtime?.controllerPid) && !isLocalPortOpen(runtime?.chromePort)) continue;
         return {
-          reason: "recent session log indicates ChatGPT was generating",
+          reason: "recent session log indicates ChatGPT was generating even if Chrome is no longer reachable",
           session: sessionId,
           title: meta?.options?.slug || meta?.promptPreview,
           url: meta?.browser?.runtime?.tabUrl,

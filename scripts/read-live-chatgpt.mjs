@@ -51,6 +51,32 @@ function isTerminalSession(meta) {
   return meta?.status === "completed" || meta?.status === "error" || meta?.status === "cancelled";
 }
 
+function sessionDir(id) {
+  return id ? path.join(oracleHomeDir(), "sessions", id) : null;
+}
+
+function sessionLogText(id) {
+  const dir = sessionDir(id);
+  if (!dir) return "";
+  const chunks = [];
+  for (const filePath of [
+    path.join(dir, "output.log"),
+    path.join(dir, "models", "gpt-5.5-pro.log"),
+    path.join(dir, "models", "gpt-5.2-instant.log"),
+  ]) {
+    try {
+      chunks.push(fs.readFileSync(filePath, "utf8").slice(-24000));
+    } catch {
+      // Missing logs are normal.
+    }
+  }
+  return chunks.join("\n");
+}
+
+function hasSubmittedLogEvidence(id) {
+  return /ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true|Waiting for ChatGPT response/i.test(sessionLogText(id));
+}
+
 function writeJsonIfPossible(filePath, value) {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -93,20 +119,29 @@ function persistLiveState(output) {
 function clearLiveStateAfterFailedRead(attempts) {
   const sessionMeta = readSessionMeta(sessionId);
   const sessionStillRunning = sessionMeta?.status === "running";
+  const submittedLogEvidence = hasSubmittedLogEvidence(sessionId);
   const existingState = readJson(sessionId
     ? path.join(oracleHomeDir(), "sessions", sessionId, "live-state.json")
     : path.join(oracleHomeDir(), "live-chatgpt-state.json"));
   if (
-    existingState?.generating &&
-    sessionMeta?.status === "error" &&
-    existingState?.url &&
-    /chatgpt\.com\/c\//i.test(existingState.url)
+    (existingState?.generating || submittedLogEvidence) &&
+    (sessionStillRunning || sessionMeta?.status === "error") &&
+    (
+      submittedLogEvidence ||
+      (
+        existingState?.url &&
+        /chatgpt\.com\/c\//i.test(existingState.url)
+      )
+    )
   ) {
     const preserved = {
       ...existingState,
       observedAt: new Date().toISOString(),
+      generating: true,
       sessionStatus: sessionMeta?.status,
-      sessionError: "Live read failed, preserving previous generating conversation state instead of clearing it",
+      sessionError: submittedLogEvidence
+        ? "Live read failed, preserving submitted ChatGPT generation evidence even though Chrome is unreachable"
+        : "Live read failed, preserving previous generating conversation state instead of clearing it",
       attempts,
     };
     writeJsonIfPossible(path.join(oracleHomeDir(), "live-chatgpt-state.json"), preserved);
@@ -336,7 +371,8 @@ async function readTarget({ target, port, sessionMeta, sessionRuntime, needles, 
   let value = null;
   let sessionMatch = null;
   const startedAt = Date.now();
-  const maxWaitMs = opened ? 30000 : 8000;
+  const maxWaitMs = sessionId ? 60000 : opened ? 30000 : 8000;
+  let reloadedEmptyConversation = false;
   do {
     value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars, needles));
     sessionMatch = sessionMatchEvidence({
@@ -350,6 +386,18 @@ async function readTarget({ target, port, sessionMeta, sessionRuntime, needles, 
       value?.promptMatch ||
       Number(value?.length ?? 0) > 3000;
     if (!sessionId || !sessionMatch.matched || hasConversationContent) break;
+    const valueUrl = String(value?.url || target.url || "");
+    if (
+      !reloadedEmptyConversation &&
+      /chatgpt\.com\/c\//i.test(valueUrl) &&
+      !hasConversationContent &&
+      Date.now() - startedAt > 5000
+    ) {
+      reloadedEmptyConversation = true;
+      await cdpEvaluate(target.webSocketDebuggerUrl, "location.reload(); true");
+      await wait(5000);
+      continue;
+    }
     await wait(1000);
   } while (Date.now() - startedAt < maxWaitMs);
   return {
