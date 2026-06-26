@@ -71,7 +71,20 @@ export async function writeChromePid(userDataDir, pid) {
 }
 export async function findRunningChromeDebugTargetForProfile(userDataDir) {
     if (process.platform === "win32") {
-        return null;
+        try {
+            const escapedDir = userDataDir.replace(/'/g, "''");
+            const { stdout } = await execFileAsync("powershell.exe", [
+                "-NoProfile",
+                "-Command",
+                `$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -like '*--user-data-dir*' -and $_.CommandLine -like '*${escapedDir}*' -and $_.CommandLine -match '--remote-debugging-port(?:=|\\s+)(\\d+)' } | ForEach-Object { "$($_.ProcessId) $($Matches[1]) $($_.CommandLine)" }`,
+            ], {
+                maxBuffer: 10 * 1024 * 1024,
+            });
+            return findChromeDebugTargetForProfileFromWindowsProcessList(String(stdout ?? ""), userDataDir);
+        }
+        catch {
+            return null;
+        }
     }
     try {
         const { stdout } = await execFileAsync("ps", ["-ax", "-o", "pid=", "-o", "command="], {
@@ -82,6 +95,22 @@ export async function findRunningChromeDebugTargetForProfile(userDataDir) {
     catch {
         return null;
     }
+}
+function findChromeDebugTargetForProfileFromWindowsProcessList(processList, userDataDir) {
+    for (const line of processList.split("\n")) {
+        const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
+        if (!match)
+            continue;
+        const pid = Number.parseInt(match[1] ?? "", 10);
+        const port = Number.parseInt(match[2] ?? "", 10);
+        const command = match[3] ?? "";
+        if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(port) || port <= 0)
+            continue;
+        if (!command.includes(userDataDir))
+            continue;
+        return { pid, port };
+    }
+    return null;
 }
 function findChromeDebugTargetForProfileFromProcessList(processList, userDataDir) {
     for (const line of processList.split("\n")) {

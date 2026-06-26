@@ -43,6 +43,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Long review-style browser runs that complete with a suspiciously tiny answer are rejected after rendering the transcript, so callers do not treat outputs like `I` as valid reviews.
 - Live ChatGPT recovery waits for conversation DOM content after reopening a saved session URL and reads current assistant turns from ChatGPT's role/markdown nodes, so loaded answers are not misclassified as missing when `article` elements are absent.
 - Browser recovery treats recent ChatGPT generation logs as submitted/recoverable even when Chrome or the DevTools port disappeared, because the server-side conversation may still be generating or may have completed after local Chrome disconnected.
+- On Windows, browser launch reuses an already-running Oracle Chrome for the same profile instead of launching a duplicate process that immediately exits with `Opening in existing browser session`; launch handoff is recovered by rediscovering the real DevTools port.
 
 ## Recommended Commands
 

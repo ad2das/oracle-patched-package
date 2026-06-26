@@ -1683,11 +1683,29 @@ async function acquireManualLoginChromeForRun(userDataDir, config, logger, sessi
         const reusedChrome = await maybeReuse(userDataDir, logger, {
             waitForPortMs: config.reuseChromeWaitMs,
         });
-        const chrome = reusedChrome ??
+        let chrome = reusedChrome ??
             (await launch({
                 ...config,
                 remoteChrome: config.remoteChrome,
             }, userDataDir, logger));
+        if (!reusedChrome && chrome.port) {
+            const launchedProbe = await verifyDevToolsReachable({ port: chrome.port });
+            if (!launchedProbe.ok) {
+                const discovered = await findRunningChromeDebugTargetForProfile(userDataDir);
+                if (discovered) {
+                    const discoveredProbe = await verifyDevToolsReachable({ port: discovered.port });
+                    if (discoveredProbe.ok) {
+                        logger(`Launched Chrome handed off to an existing browser session; reusing discovered DevTools port ${discovered.port}, pid ${discovered.pid}.`);
+                        chrome = {
+                            port: discovered.port,
+                            pid: discovered.pid,
+                            kill: async () => { },
+                            process: undefined,
+                        };
+                    }
+                }
+            }
+        }
         // Persist while the launch lock is still held so parallel callers reuse
         // this Chrome instead of racing to start another one on the same profile.
         if (chrome.port) {
