@@ -388,6 +388,9 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             userError.details?.stage === "assistant-timeout";
         const cloudflareChallenge = userError?.category === "browser-automation" &&
             userError.details?.stage === "cloudflare-challenge";
+        const attachmentUploadTimeout = userError?.category === "browser-automation" &&
+            userError.details?.stage === "execute-browser" &&
+            /Attachments did not finish uploading before timeout/i.test(userError.message);
         if (connectionLost && mode === "browser") {
             const runtime = userError.details
                 ?.runtime;
@@ -493,6 +496,39 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
                 }
             }
             log(dim(`Reattach later with: oracle session ${sessionMeta.id}`));
+            return;
+        }
+        if (attachmentUploadTimeout && mode === "browser") {
+            log(dim("Attachment upload readiness timed out; keeping session running because ChatGPT may still have submitted or be generating."));
+            if (modelForStatus) {
+                await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                    status: "running",
+                    completedAt: undefined,
+                    response: { status: "running", incompleteReason: "attachment-upload-timeout" },
+                    error: {
+                        category: userError.category,
+                        message: userError.message,
+                        details: userError.details,
+                    },
+                });
+            }
+            await sessionStore.updateSession(sessionMeta.id, {
+                status: "running",
+                completedAt: undefined,
+                errorMessage: message,
+                mode,
+                browser: {
+                    config: browserConfig,
+                    runtime: userError.details?.runtime ?? sessionMeta.browser?.runtime,
+                },
+                response: { status: "running", incompleteReason: "attachment-upload-timeout" },
+                error: {
+                    category: userError.category,
+                    message: userError.message,
+                    details: userError.details,
+                },
+            });
+            log(dim(`Recover before retrying: oracle session ${sessionMeta.id} --render`));
             return;
         }
         if (cloudflareChallenge && mode === "browser") {

@@ -55,7 +55,13 @@ function writeJsonIfPossible(filePath, value) {
 function persistLiveState(output) {
   const observedAt = new Date().toISOString();
   const sessionMeta = readSessionMeta(output.session);
-  const generating = isTerminalSession(sessionMeta) ? false : Boolean(output.generating);
+  const terminalButLiveConversation =
+    isTerminalSession(sessionMeta) &&
+    Boolean(output.url || output.tabUrl) &&
+    /chatgpt\.com\/c\//i.test(`${output.url ?? ""}\n${output.tabUrl ?? ""}`);
+  const generating = terminalButLiveConversation
+    ? Boolean(output.generating)
+    : isTerminalSession(sessionMeta) ? false : Boolean(output.generating);
   const state = {
     observedAt,
     generating,
@@ -79,6 +85,28 @@ function persistLiveState(output) {
 function clearLiveStateAfterFailedRead(attempts) {
   const sessionMeta = readSessionMeta(sessionId);
   const sessionStillRunning = sessionMeta?.status === "running";
+  const existingState = readJson(sessionId
+    ? path.join(oracleHomeDir(), "sessions", sessionId, "live-state.json")
+    : path.join(oracleHomeDir(), "live-chatgpt-state.json"));
+  if (
+    existingState?.generating &&
+    sessionMeta?.status === "error" &&
+    existingState?.url &&
+    /chatgpt\.com\/c\//i.test(existingState.url)
+  ) {
+    const preserved = {
+      ...existingState,
+      observedAt: new Date().toISOString(),
+      sessionStatus: sessionMeta?.status,
+      sessionError: "Live read failed, preserving previous generating conversation state instead of clearing it",
+      attempts,
+    };
+    writeJsonIfPossible(path.join(oracleHomeDir(), "live-chatgpt-state.json"), preserved);
+    if (sessionId) {
+      writeJsonIfPossible(path.join(oracleHomeDir(), "sessions", sessionId, "live-state.json"), preserved);
+    }
+    return;
+  }
   const state = {
     observedAt: new Date().toISOString(),
     generating: sessionStillRunning,
@@ -134,9 +162,8 @@ function scoreTab(tab, runtime) {
   if (runtime?.chromeTargetId && tab.id === runtime.chromeTargetId) score += 1000;
   if (runtime?.tabUrl && url === runtime.tabUrl) score += 900;
   if (runtime?.conversationId && url.includes(runtime.conversationId)) score += 850;
-  if (runtime?.chromeTargetId || runtime?.tabUrl || runtime?.conversationId) return score;
+  if (url.includes("chatgpt.com/c/")) score += 250;
   if (titleNeedle && haystack.includes(titleNeedle)) score += 100;
-  if (url.includes("chatgpt.com/c/")) score += 50;
   if (url.includes("chatgpt.com")) score += 10;
   return score;
 }

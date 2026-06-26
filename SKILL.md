@@ -30,6 +30,8 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Browser duplicate-run guard blocks a new browser submission when a recent session or live recovery check indicates ChatGPT may still be generating.
 - Browser duplicate-run guard ignores stale live-state and log evidence for sessions already marked `completed`, `error`, or `cancelled`.
 - ChatGPT browser capture targets the latest assistant turn after the latest user prompt and waits for real completion controls before saving a transcript.
+- Attachment upload readiness timeouts are treated as recoverable when file evidence is visible, because ChatGPT may already have accepted the files and started a response even if the CLI readiness check timed out.
+- Live recovery preserves `generating=true` for errored sessions when a real `chatgpt.com/c/...` conversation is still generating, instead of clearing it just because the session metadata says `error`.
 
 ## Recommended Commands
 
@@ -60,6 +62,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Use `--browser-attachments always` when you need to prove real upload behavior.
 - Browser runs can take a long time; if a run detaches or times out, reattach to the stored session instead of re-running.
 - Do not treat `chrome-disconnected`, `Browser session ended`, `No live ChatGPT tab could be read`, or a session `error` status as proof that ChatGPT stopped generating or that no answer exists. If `read-live-chatgpt.mjs` has ever returned `generating=true` for the conversation, keep polling/recovering that same conversation until it returns `generating=false`, yields final answer text, or the user explicitly tells you to abandon it.
+- Do not treat `Attachments did not finish uploading before timeout` as proof that the prompt was not submitted. First inspect the actual ChatGPT tab/conversation; files may be attached and the assistant may already be generating.
 - If a browser run times out, disconnects, or reports `error`, first run `scripts/run-oracle.mjs session <id> --render`. This can reopen the saved ChatGPT conversation, save the transcript artifact, and mark the session completed.
 - For browser review/check/audit prompts, rely on the latest assistant turn after the latest user prompt. If the transcript does not match the actual ChatGPT conversation, recover the same session with `session <id> --render` or `read-live-chatgpt.mjs --session <id>` and verify the page before using the artifact.
 - First check whether the Oracle Chrome process still exists and has a `--remote-debugging-port`; if so, read the live ChatGPT tab with `scripts/read-live-chatgpt.mjs`. If the recovered text still says `Pro thinking`, `Finalizing answer`, `Thinking`, or `Stop generating`, wait and poll the live tab instead of starting a new Oracle request.

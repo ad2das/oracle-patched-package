@@ -47,6 +47,15 @@ function isTerminalSession(meta) {
   return meta?.status === "completed" || meta?.status === "error" || meta?.status === "cancelled";
 }
 
+function hasRecoverableGeneratingConversation(state, meta) {
+  return Boolean(
+    state?.generating &&
+    meta?.status === "error" &&
+    state?.url &&
+    /chatgpt\.com\/c\//i.test(state.url)
+  );
+}
+
 function readSessionMeta(oracleHome, sessionId) {
   if (!sessionId) return null;
   return readJson(join(oracleHome, "sessions", sessionId, "meta.json"));
@@ -57,7 +66,11 @@ function findActiveBrowserRecoveryState() {
   const maxAgeMs = Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000);
   const liveState = readJson(join(oracleHome, "live-chatgpt-state.json"));
   const liveStateMeta = readSessionMeta(oracleHome, liveState?.session);
-  if (liveState?.generating && !isTerminalSession(liveStateMeta) && recentEnough(liveState.observedAt, maxAgeMs)) {
+  if (
+    liveState?.generating &&
+    (!isTerminalSession(liveStateMeta) || hasRecoverableGeneratingConversation(liveState, liveStateMeta)) &&
+    recentEnough(liveState.observedAt, maxAgeMs)
+  ) {
     return {
       reason: "read-live-chatgpt previously observed generating=true",
       session: liveState.session,
@@ -77,10 +90,12 @@ function findActiveBrowserRecoveryState() {
       continue;
     }
     const meta = readSessionMeta(oracleHome, sessionId);
-    if (isTerminalSession(meta)) continue;
-
     const sessionLiveState = readJson(join(sessionDir, "live-state.json"));
-    if (sessionLiveState?.generating && recentEnough(sessionLiveState.observedAt, maxAgeMs)) {
+    if (
+      sessionLiveState?.generating &&
+      (!isTerminalSession(meta) || hasRecoverableGeneratingConversation(sessionLiveState, meta)) &&
+      recentEnough(sessionLiveState.observedAt, maxAgeMs)
+    ) {
       return {
         reason: "session live-state recorded generating=true",
         session: sessionId,
@@ -89,6 +104,8 @@ function findActiveBrowserRecoveryState() {
         observedAt: sessionLiveState.observedAt,
       };
     }
+
+    if (isTerminalSession(meta)) continue;
 
     if (meta?.status === "running" && (meta.mode === "browser" || meta.engine === "browser")) {
       return {
