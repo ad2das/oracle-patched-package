@@ -197,9 +197,11 @@ function findActiveBrowserRecoveryState() {
     }
     const meta = readSessionMeta(oracleHome, sessionId);
     const sessionLiveState = readJson(join(sessionDir, "live-state.json"));
+    const sessionLiveStatePortStillOpen = isLocalPortOpen(sessionLiveState?.port);
     if (
       sessionLiveState?.generating &&
       (!isTerminalSession(meta) || hasRecoverableGeneratingConversation(sessionLiveState, meta)) &&
+      (!isTerminalSession(meta) || sessionLiveStatePortStillOpen) &&
       recentEnough(sessionLiveState.observedAt, maxAgeMs)
     ) {
       return {
