@@ -97,7 +97,11 @@ function reconcileNotSubmittedBrowserSessions() {
     const meta = readJson(metaPath);
     if (meta?.status !== "running" || (meta.mode !== "browser" && meta.engine !== "browser")) continue;
     const runtime = meta.browser?.runtime;
-    if (isProcessAlive(runtime?.controllerPid) || isProcessAlive(runtime?.chromePid)) continue;
+    // A live Chrome process alone does not mean the request is running. The
+    // controller is the process that can still type/submit/capture. If it died
+    // before promptSubmitted=true, treat the browser tab as abandoned instead
+    // of blocking future runs forever.
+    if (isProcessAlive(runtime?.controllerPid)) continue;
     if (runtime?.promptSubmitted === true || isChatGptConversationUrl(runtime?.tabUrl) || runtime?.conversationId) continue;
     const liveState = readJson(join(sessionDir, "live-state.json"));
     const liveUrl = liveState?.url || liveState?.tabUrl;

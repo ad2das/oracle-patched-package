@@ -56,6 +56,9 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Recover a live ChatGPT browser tab after CLI disconnect:
   - `node "<skill-folder>\\scripts\\read-live-chatgpt.mjs" --session "<id>" --tail 40000`
 
+- Submit/recover a browser session that attached files but never created a ChatGPT conversation:
+  - `node "<skill-folder>\\scripts\\submit-live-chatgpt.mjs" --session "<id>"`
+
 ## Usage Notes
 
 - Pick a tight file set and avoid secrets.
@@ -69,3 +72,4 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Prefer the live-tab recovery script over launching another Oracle run when the user can see Chrome still generating. Starting another run can duplicate requests and confuse which answer should be used.
 - The wrapper refuses new browser runs when a recent live state/session log suggests generation may still be active, but terminal sessions are not treated as active just because an older recovery read once saw `generating=true`. Override only for an intentional duplicate by setting `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
 - Treat Oracle output as advisory and verify against the repo and tests.
+- If a session remains `running` but `runtime.promptSubmitted=false`, the URL is still `https://chatgpt.com/`, and live recovery shows `generating=false`, do not treat it as a valid in-progress answer. Use `submit-live-chatgpt.mjs --session <id>` to submit the existing composer, or let the wrapper reconcile it as `not-submitted` once the controller process is gone.
