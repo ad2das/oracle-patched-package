@@ -231,6 +231,32 @@ function isLocalPortOpen(port) {
   return probe.status === 0;
 }
 
+function confirmedActiveGeneratingState(state, meta, sessionId) {
+  if (!state?.generating || !recentEnough(state.observedAt, Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000))) {
+    return null;
+  }
+  const stateUrl = state.url || state.tabUrl;
+  const portStillOpen = isLocalPortOpen(state.port);
+  if (!portStillOpen) return null;
+
+  if (isTerminalSession(meta) && !hasRecoverableGeneratingConversation(state, meta)) {
+    return null;
+  }
+
+  const liveRead = sessionId ? readLiveSessionJson(sessionId) : null;
+  if (!liveRead?.ok) return null;
+
+  const output = liveRead.value;
+  const liveUrl = output?.url || output?.tabUrl || stateUrl;
+  if (!output?.generating || !isChatGptConversationUrl(liveUrl)) return null;
+
+  return {
+    url: liveUrl,
+    title: output?.title || output?.tabTitle || state.title || state.tabTitle,
+    observedAt: output?.observedAt || state.observedAt,
+  };
+}
+
 function reconcileNotSubmittedBrowserSessions() {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const sessionsDir = join(oracleHome, "sessions");
@@ -306,19 +332,14 @@ function findActiveBrowserRecoveryState() {
   const maxAgeMs = Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000);
   const liveState = readJson(join(oracleHome, "live-chatgpt-state.json"));
   const liveStateMeta = readSessionMeta(oracleHome, liveState?.session);
-  const liveStatePortStillOpen = isLocalPortOpen(liveState?.port);
-  if (
-    liveState?.generating &&
-    (!isTerminalSession(liveStateMeta) || hasRecoverableGeneratingConversation(liveState, liveStateMeta)) &&
-    (!isTerminalSession(liveStateMeta) || liveStatePortStillOpen) &&
-    recentEnough(liveState.observedAt, maxAgeMs)
-  ) {
+  const confirmedLiveState = confirmedActiveGeneratingState(liveState, liveStateMeta, liveState?.session);
+  if (confirmedLiveState) {
     return {
-      reason: "read-live-chatgpt previously observed generating=true",
+      reason: "live ChatGPT tab is still generating",
       session: liveState.session,
-      title: liveState.title || liveState.tabTitle,
-      url: liveState.url || liveState.tabUrl,
-      observedAt: liveState.observedAt,
+      title: confirmedLiveState.title,
+      url: confirmedLiveState.url,
+      observedAt: confirmedLiveState.observedAt,
     };
   }
 
@@ -333,25 +354,28 @@ function findActiveBrowserRecoveryState() {
     }
     const meta = readSessionMeta(oracleHome, sessionId);
     const sessionLiveState = readJson(join(sessionDir, "live-state.json"));
-    const sessionLiveStatePortStillOpen = isLocalPortOpen(sessionLiveState?.port);
-    if (
-      sessionLiveState?.generating &&
-      (!isTerminalSession(meta) || hasRecoverableGeneratingConversation(sessionLiveState, meta)) &&
-      (!isTerminalSession(meta) || sessionLiveStatePortStillOpen) &&
-      recentEnough(sessionLiveState.observedAt, maxAgeMs)
-    ) {
+    const confirmedSessionLiveState = confirmedActiveGeneratingState(sessionLiveState, meta, sessionId);
+    if (confirmedSessionLiveState) {
       return {
-        reason: "session live-state recorded generating=true",
+        reason: "session live ChatGPT tab is still generating",
         session: sessionId,
-        title: sessionLiveState.title || sessionLiveState.tabTitle,
-        url: sessionLiveState.url || sessionLiveState.tabUrl,
-        observedAt: sessionLiveState.observedAt,
+        title: confirmedSessionLiveState.title,
+        url: confirmedSessionLiveState.url,
+        observedAt: confirmedSessionLiveState.observedAt,
       };
     }
 
     if (isTerminalSession(meta)) continue;
 
     if (meta?.status === "running" && (meta.mode === "browser" || meta.engine === "browser")) {
+      const runtime = meta?.browser?.runtime;
+      const controllerAlive = isProcessAlive(runtime?.controllerPid);
+      const chromePortOpen = isLocalPortOpen(runtime?.chromePort);
+      const liveRead = chromePortOpen ? readLiveSessionJson(sessionId) : null;
+      const liveUrl = liveRead?.ok ? liveRead.value?.url || liveRead.value?.tabUrl : null;
+      if (!controllerAlive && !(liveRead?.ok && liveRead.value?.generating && isChatGptConversationUrl(liveUrl))) {
+        continue;
+      }
       return {
         reason: "stored browser session is still running",
         session: sessionId,
@@ -367,6 +391,8 @@ function findActiveBrowserRecoveryState() {
       if (Date.now() - logStat.mtimeMs > maxAgeMs) continue;
       const logTail = readFileSync(logPath, "utf8").slice(-12000);
       if (/ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true/i.test(logTail)) {
+        const runtime = meta?.browser?.runtime;
+        if (!isProcessAlive(runtime?.controllerPid) && !isLocalPortOpen(runtime?.chromePort)) continue;
         return {
           reason: "recent session log indicates ChatGPT was generating",
           session: sessionId,
