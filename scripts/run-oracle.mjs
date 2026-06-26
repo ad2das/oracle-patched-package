@@ -486,11 +486,15 @@ if (!existsSync(dependencyProbe)) {
   }
 }
 
-const run = spawnSync(process.execPath, [oracleCli, ...cliArgs], {
-  cwd: process.cwd(),
-  stdio: "inherit",
-  env: process.env,
-});
+function runOracleCli(args, extraEnv = {}) {
+  return spawnSync(process.execPath, [oracleCli, ...args], {
+    cwd: process.cwd(),
+    stdio: "inherit",
+    env: { ...process.env, ...extraEnv },
+  });
+}
+
+const run = runOracleCli(cliArgs);
 
 if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
   const verification = verifyLatestBrowserSubmissionAfterFailure();
@@ -512,7 +516,12 @@ if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
       console.error("[oracle-wrapper] The prompt was submitted by recovery. Do not start a duplicate request; read/recover this session for the answer.");
       process.exit(0);
     }
-    console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. It is safe to retry this request.");
+    if (process.env.ORACLE_SKIP_NOT_SUBMITTED_RETRY !== "1") {
+      console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once because submission was verified not_submitted.");
+      const retry = runOracleCli(cliArgs, { ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1" });
+      process.exit(retry.status ?? 1);
+    }
+    console.error("[oracle-wrapper] Automatic recovery did not submit the prompt after the one allowed retry.");
   } else {
     console.error("[oracle-wrapper] Submission state is unknown. Inspect the live browser/session before retrying.");
   }

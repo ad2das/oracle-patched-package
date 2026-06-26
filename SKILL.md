@@ -33,6 +33,9 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Attachment upload readiness timeouts are treated as recoverable when file evidence is visible, because ChatGPT may already have accepted the files and started a response even if the CLI readiness check timed out.
 - Live recovery preserves `generating=true` for errored sessions when a real `chatgpt.com/c/...` conversation is still generating, instead of clearing it just because the session metadata says `error`.
 - Browser failures that verify as `not_submitted` automatically run `submit-live-chatgpt.mjs` once against the same session; if this creates a ChatGPT conversation, the wrapper exits successfully and instructs callers to recover that session instead of retrying.
+- Browser sessions persist the fully assembled ChatGPT composer prompt before attachment upload begins, so a file-upload timeout can be live-submitted or retried without losing the prompt.
+- Attachment readiness waits are capped by `ORACLE_ATTACHMENT_READY_TIMEOUT_MS` (default 120000 ms) instead of waiting many minutes with files attached and an empty composer.
+- Browser failures that verify as `not_submitted` and cannot be live-submitted automatically retry the original Oracle CLI command once.
 
 ## Recommended Commands
 

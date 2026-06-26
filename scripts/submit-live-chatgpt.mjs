@@ -30,11 +30,12 @@ const sessionDir = path.join(oracleHome, "sessions", sessionId);
 const metaPath = path.join(sessionDir, "meta.json");
 const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
 const runtime = meta.browser?.runtime ?? {};
-const prompt = meta.options?.prompt ?? "";
+const preparedSubmission = meta.browser?.preparedSubmission ?? meta.options?.preparedSubmission ?? {};
+const prompt = preparedSubmission.prompt || meta.options?.prompt || "";
 const port = runtime.chromePort;
 
 if (!port || !prompt) {
-  console.error("Session has no Chrome port or prompt to submit.");
+  console.error(`Session has no Chrome port or prompt to submit. port=${Boolean(port)} prompt=${Boolean(prompt)}`);
   process.exit(2);
 }
 
@@ -81,9 +82,8 @@ async function withCdp(webSocketDebuggerUrl, task) {
   }
 }
 
-function submitExpression(text) {
+function prepareComposerExpression() {
   return `(() => {
-    const prompt = ${JSON.stringify(text)};
     const selectors = [
       '#prompt-textarea',
       '[data-testid="prompt-textarea"]',
@@ -109,12 +109,12 @@ function submitExpression(text) {
     };
     const candidates = selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
     const input = candidates.find(isVisible) || candidates[0];
-    if (!input) return { submitted: false, reason: 'composer-missing', url: location.href };
+    if (!input) return { ready: false, reason: 'composer-missing', url: location.href };
     input.focus?.();
     if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-      input.value = prompt;
+      input.value = '';
     } else {
-      input.textContent = prompt;
+      input.textContent = '';
       const selection = document.getSelection?.();
       const range = document.createRange?.();
       if (selection && range) {
@@ -125,6 +125,33 @@ function submitExpression(text) {
       }
     }
     dispatchInput(input);
+    return { ready: true, url: location.href };
+  })()`;
+}
+
+function composerTextExpression() {
+  return `(() => {
+    const selectors = [
+      '#prompt-textarea',
+      '[data-testid="prompt-textarea"]',
+      'textarea',
+      '[contenteditable="true"]',
+      '[role="textbox"]'
+    ];
+    const nodes = selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+    const node = nodes.find((item) => {
+      const rect = item.getBoundingClientRect?.();
+      return rect && rect.width > 0 && rect.height > 0;
+    }) || nodes[0];
+    return {
+      text: node ? ('value' in node ? node.value : node.innerText || node.textContent || '') : '',
+      url: location.href,
+    };
+  })()`;
+}
+
+function sendExpression() {
+  return `(() => {
     const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
     const send = buttons.find((button) => {
       const label = [button.getAttribute('aria-label'), button.getAttribute('data-testid'), button.textContent]
@@ -144,9 +171,7 @@ function submitExpression(text) {
       send.click();
       return { submitted: true, method: 'button', url: location.href };
     }
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
-    return { submitted: true, method: 'enter', url: location.href };
+    return { submitted: false, reason: 'send-button-missing', url: location.href };
   })()`;
 }
 
@@ -176,20 +201,63 @@ if (!tab) {
 }
 
 const result = await withCdp(tab.webSocketDebuggerUrl, async (send) => {
-  const submitted = await send("Runtime.evaluate", {
-    expression: submitExpression(prompt),
+  const prepared = await send("Runtime.evaluate", {
+    expression: prepareComposerExpression(),
     returnByValue: true,
     awaitPromise: true,
   });
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  const probe = await send("Runtime.evaluate", {
-    expression: probeExpression(),
-    returnByValue: true,
-    awaitPromise: true,
-  });
+  const preparedValue = prepared.result?.result?.value;
+  let submittedValue = preparedValue?.ready
+    ? { submitted: false, reason: "not-sent-yet", url: preparedValue.url }
+    : { submitted: false, reason: preparedValue?.reason ?? "composer-missing", url: preparedValue?.url };
+  if (preparedValue?.ready) {
+    await send("Input.insertText", { text: prompt });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const composer = await send("Runtime.evaluate", {
+      expression: composerTextExpression(),
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    const composerText = composer.result?.result?.value?.text ?? "";
+    const expectedPrefix = prompt.trim().slice(0, 80);
+    if (!composerText.includes(expectedPrefix)) {
+      submittedValue = {
+        submitted: false,
+        reason: "prompt-insert-verification-failed",
+        composerLength: composerText.length,
+        expectedPrefix,
+        url: composer.result?.result?.value?.url,
+      };
+    } else {
+      const clicked = await send("Runtime.evaluate", {
+        expression: sendExpression(),
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      submittedValue = clicked.result?.result?.value;
+      if (!submittedValue?.submitted) {
+        await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+        await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+        submittedValue = { submitted: true, method: "cdp-enter", url: composer.result?.result?.value?.url };
+      }
+    }
+  }
+  let probe = null;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    probe = await send("Runtime.evaluate", {
+      expression: probeExpression(),
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    const value = probe.result?.result?.value;
+    if (!submittedValue?.submitted || /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(value?.url ?? "")) || value?.generating) {
+      break;
+    }
+  }
   return {
-    submitted: submitted.result?.result?.value,
-    probe: probe.result?.result?.value,
+    submitted: submittedValue,
+    probe: probe?.result?.result?.value,
   };
 });
 

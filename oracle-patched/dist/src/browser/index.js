@@ -830,10 +830,13 @@ export async function runBrowserMode(options) {
                     }
                     await delay(500);
                 }
-                // Scale timeout based on number of files: base 45s + 20s per additional file.
+                // Scale timeout based on number of files, but do not leave ChatGPT
+                // sitting with files attached and an empty prompt for many minutes.
                 const baseTimeout = config.inputTimeoutMs ?? 30_000;
                 const perFileTimeout = 20_000;
-                const waitBudget = Math.max(10 * 60_000, Math.max(baseTimeout, 45_000) + (submissionAttachments.length - 1) * perFileTimeout);
+                const configuredMaxWait = Number(process.env.ORACLE_ATTACHMENT_READY_TIMEOUT_MS || 120_000);
+                const computedWait = Math.max(baseTimeout, 45_000) + (submissionAttachments.length - 1) * perFileTimeout;
+                const waitBudget = Math.max(45_000, Math.min(configuredMaxWait, computedWait));
                 await waitForAttachmentCompletion(Runtime, waitBudget, attachmentNames, logger);
                 logger("All attachments uploaded");
             }
@@ -1957,10 +1960,13 @@ async function runRemoteBrowserMode(promptText, attachments, config, logger, opt
                     await uploadAttachmentViaDataTransfer({ runtime: Runtime, dom: DOM }, attachment, logger);
                     await delay(500);
                 }
-                // Scale timeout based on number of files: base 30s + 15s per additional file
+                // Scale timeout based on number of files, but do not leave ChatGPT
+                // sitting with files attached and an empty prompt for many minutes.
                 const baseTimeout = config.inputTimeoutMs ?? 30_000;
                 const perFileTimeout = 15_000;
-                const waitBudget = Math.max(10 * 60_000, Math.max(baseTimeout, 30_000) + (submissionAttachments.length - 1) * perFileTimeout);
+                const configuredMaxWait = Number(process.env.ORACLE_ATTACHMENT_READY_TIMEOUT_MS || 120_000);
+                const computedWait = Math.max(baseTimeout, 30_000) + (submissionAttachments.length - 1) * perFileTimeout;
+                const waitBudget = Math.max(30_000, Math.min(configuredMaxWait, computedWait));
                 await waitForAttachmentCompletion(Runtime, waitBudget, attachmentNames, logger);
                 logger("All attachments uploaded");
             }

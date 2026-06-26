@@ -264,6 +264,12 @@ export async function updateSessionMetadata(sessionId, updates) {
         (await readLegacySessionMetadata(sessionId, { reconcile: false, persist: false })) ??
         { id: sessionId };
     const next = { ...existing, ...updates };
+    if (existing.browser && updates.browser) {
+        next.browser = { ...existing.browser, ...updates.browser };
+    }
+    if (existing.options && updates.options) {
+        next.options = { ...existing.options, ...updates.options };
+    }
     await fs.writeFile(metaPath(sessionId), JSON.stringify(next, null, 2), "utf8");
     return next;
 }

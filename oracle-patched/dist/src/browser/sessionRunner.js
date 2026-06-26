@@ -64,6 +64,21 @@ export async function runBrowserSessionExecution({ runOptions, browserConfig, cw
     const assemblePrompt = deps.assemblePrompt ?? assembleBrowserPrompt;
     const executeBrowser = deps.executeBrowser ?? runBrowserMode;
     const promptArtifacts = await assemblePrompt(runOptions, { cwd });
+    const persistPreparedSubmission = deps.persistPreparedSubmission ?? (() => { });
+    await persistPreparedSubmission({
+        prompt: promptArtifacts.composerText,
+        attachments: promptArtifacts.attachments,
+        fallbackSubmission: promptArtifacts.fallback
+            ? {
+                prompt: promptArtifacts.fallback.composerText,
+                attachments: promptArtifacts.fallback.attachments,
+            }
+            : undefined,
+        attachmentMode: promptArtifacts.attachmentMode,
+        attachmentsPolicy: promptArtifacts.attachmentsPolicy,
+        bundled: promptArtifacts.bundled,
+        estimatedInputTokens: promptArtifacts.estimatedInputTokens,
+    });
     if (runOptions.verbose) {
         log(chalk.dim(`[verbose] Browser config: ${JSON.stringify({
             ...browserConfig,

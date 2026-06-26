@@ -53,10 +53,28 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             }
             const runnerDeps = {
                 ...browserDeps,
+                persistPreparedSubmission: async (preparedSubmission) => {
+                    await sessionStore.updateSession(sessionMeta.id, {
+                        options: {
+                            ...(sessionMeta.options ?? {}),
+                            prompt: preparedSubmission.prompt || sessionMeta.options?.prompt || runOptions.prompt,
+                            preparedSubmission,
+                        },
+                        browser: {
+                            config: browserConfig,
+                            preparedSubmission,
+                        },
+                    });
+                },
                 persistRuntimeHint: async (runtime) => {
+                    const latest = await sessionStore.readSession(sessionMeta.id);
                     await sessionStore.updateSession(sessionMeta.id, {
                         status: "running",
-                        browser: { config: browserConfig, runtime },
+                        browser: {
+                            ...(latest?.browser ?? {}),
+                            config: browserConfig,
+                            runtime,
+                        },
                     });
                 },
             };
