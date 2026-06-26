@@ -407,6 +407,9 @@ function findActiveBrowserRecoveryState() {
       const chromePortOpen = isLocalPortOpen(runtime?.chromePort);
       const liveRead = chromePortOpen ? readLiveSessionJson(sessionId) : null;
       const liveUrl = liveRead?.ok ? liveRead.value?.url || liveRead.value?.tabUrl : null;
+      if (liveRead?.ok && !liveRead.value?.generating) {
+        continue;
+      }
       if (!controllerAlive && !(liveRead?.ok && liveRead.value?.generating && isChatGptConversationUrl(liveUrl))) {
         continue;
       }
