@@ -78,6 +78,7 @@ function findActiveBrowserRecoveryState() {
     }
 
     const meta = readJson(join(sessionDir, "meta.json"));
+    if (meta?.status === "completed") continue;
     if (meta?.status === "running" && (meta.mode === "browser" || meta.engine === "browser")) {
       return {
         reason: "stored browser session is still running",
