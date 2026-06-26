@@ -39,6 +39,14 @@ function readSessionMeta(id) {
   }
 }
 
+function readJson(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function isTerminalSession(meta) {
   return meta?.status === "completed" || meta?.status === "error" || meta?.status === "cancelled";
 }
