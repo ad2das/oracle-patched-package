@@ -61,6 +61,142 @@ function readSessionMeta(oracleHome, sessionId) {
   return readJson(join(oracleHome, "sessions", sessionId, "meta.json"));
 }
 
+function listSessionDirs(oracleHome) {
+  const sessionsDir = join(oracleHome, "sessions");
+  if (!existsSync(sessionsDir)) return [];
+  return readdirSync(sessionsDir)
+    .map((sessionId) => {
+      const sessionDir = join(sessionsDir, sessionId);
+      try {
+        const stat = statSync(sessionDir);
+        return stat.isDirectory() ? { sessionId, sessionDir, mtimeMs: stat.mtimeMs } : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+function newestBrowserSession(oracleHome) {
+  for (const item of listSessionDirs(oracleHome)) {
+    const meta = readSessionMeta(oracleHome, item.sessionId);
+    if (meta?.mode === "browser" || meta?.engine === "browser") return { ...item, meta };
+  }
+  return null;
+}
+
+function hasSubmittedRuntime(runtime) {
+  return Boolean(
+    runtime?.promptSubmitted === true ||
+    runtime?.conversationId ||
+    isChatGptConversationUrl(runtime?.tabUrl)
+  );
+}
+
+function readLiveSessionJson(sessionId) {
+  const result = spawnSync(process.execPath, [
+    join(scriptDir, "read-live-chatgpt.mjs"),
+    "--session",
+    sessionId,
+    "--tail",
+    "12000",
+    "--json",
+    "--no-open-missing",
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (result.status !== 0 || !result.stdout.trim()) {
+    return {
+      ok: false,
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  }
+  try {
+    return { ok: true, value: JSON.parse(result.stdout) };
+  } catch (error) {
+    return {
+      ok: false,
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      parseError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function verifyLatestBrowserSubmissionAfterFailure() {
+  const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+  const latest = newestBrowserSession(oracleHome);
+  if (!latest) return { state: "unknown", reason: "no browser session found" };
+
+  const runtime = latest.meta?.browser?.runtime;
+  const liveState = readJson(join(latest.sessionDir, "live-state.json"));
+  if (hasSubmittedRuntime(runtime)) {
+    return {
+      state: "submitted",
+      session: latest.sessionId,
+      reason: "session runtime recorded promptSubmitted/conversation evidence",
+      url: runtime?.tabUrl,
+      promptSubmitted: runtime?.promptSubmitted,
+    };
+  }
+  if (liveState?.url && isChatGptConversationUrl(liveState.url)) {
+    return {
+      state: "submitted",
+      session: latest.sessionId,
+      reason: "live-state recorded ChatGPT conversation URL",
+      url: liveState.url,
+      generating: liveState.generating,
+    };
+  }
+
+  const liveRead = readLiveSessionJson(latest.sessionId);
+  if (liveRead.ok) {
+    const output = liveRead.value;
+    const url = output?.url || output?.tabUrl;
+    const textLength = Number(output?.length ?? 0) || 0;
+    if (isChatGptConversationUrl(url) && (output?.generating || textLength > 0)) {
+      return {
+        state: "submitted",
+        session: latest.sessionId,
+        reason: "live DOM read found ChatGPT conversation content",
+        url,
+        generating: output?.generating,
+        length: textLength,
+      };
+    }
+    return {
+      state: "not_submitted",
+      session: latest.sessionId,
+      reason: "live DOM read succeeded but no ChatGPT conversation was present",
+      url,
+      generating: output?.generating,
+      length: textLength,
+    };
+  }
+
+  if (latest.meta?.status === "error" && latest.meta?.response?.incompleteReason === "not-submitted") {
+    return {
+      state: "not_submitted",
+      session: latest.sessionId,
+      reason: "session metadata explicitly says not-submitted and live read failed",
+      liveRead,
+    };
+  }
+
+  return {
+    state: "unknown",
+    session: latest.sessionId,
+    reason: "CLI failed and live verification could not prove submitted or not_submitted",
+    liveRead,
+  };
+}
+
 function writeJson(filePath, value) {
   writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -292,5 +428,17 @@ const run = spawnSync(process.execPath, [oracleCli, ...cliArgs], {
   stdio: "inherit",
   env: process.env,
 });
+
+if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
+  const verification = verifyLatestBrowserSubmissionAfterFailure();
+  console.error(`[oracle-wrapper] post-failure submission verification: ${JSON.stringify(verification)}`);
+  if (verification.state === "submitted") {
+    console.error("[oracle-wrapper] The browser command failed, but the prompt appears submitted. Do not retry blindly; recover/read this session first.");
+  } else if (verification.state === "not_submitted") {
+    console.error("[oracle-wrapper] The prompt appears not submitted after live verification. It is safe to retry this request.");
+  } else {
+    console.error("[oracle-wrapper] Submission state is unknown. Inspect the live browser/session before retrying.");
+  }
+}
 
 process.exit(run.status ?? 1);
