@@ -70,6 +70,28 @@ function persistLiveState(output) {
   }
 }
 
+function clearLiveStateAfterFailedRead(attempts) {
+  const state = {
+    observedAt: new Date().toISOString(),
+    generating: false,
+    title: titleFilter,
+    url: null,
+    tabTitle: null,
+    tabUrl: null,
+    tabId: null,
+    port: explicitPort,
+    session: sessionId,
+    sessionStatus: readSessionMeta(sessionId)?.status,
+    sessionError: "No live ChatGPT tab could be read",
+    length: 0,
+    attempts,
+  };
+  writeJsonIfPossible(path.join(oracleHomeDir(), "live-chatgpt-state.json"), state);
+  if (sessionId) {
+    writeJsonIfPossible(path.join(oracleHomeDir(), "sessions", sessionId, "live-state.json"), state);
+  }
+}
+
 function readSessionRuntime(id) {
   return readSessionMeta(id)?.browser?.runtime ?? null;
 }
@@ -234,6 +256,7 @@ async function main() {
       attempts.push({ port, error: error instanceof Error ? error.message : String(error) });
     }
   }
+  clearLiveStateAfterFailedRead(attempts);
   console.error(`No live ChatGPT tab could be read. Attempts: ${JSON.stringify(attempts)}`);
   process.exit(1);
 }
