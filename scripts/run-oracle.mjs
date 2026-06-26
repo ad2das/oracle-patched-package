@@ -30,6 +30,18 @@ function isBrowserRun(args) {
   return argValue(args, "--engine") === "browser" || argValue(args, "-e") === "browser";
 }
 
+function isSessionRender(args) {
+  const first = args.find((arg) => !arg.startsWith("-"));
+  return first === "session" && args.includes("--render");
+}
+
+function sessionIdForSessionCommand(args) {
+  if (!isSessionRender(args)) return null;
+  const sessionIndex = args.indexOf("session");
+  if (sessionIndex < 0) return null;
+  return args.slice(sessionIndex + 1).find((arg) => !arg.startsWith("-")) ?? null;
+}
+
 function shouldDefaultKeepBrowser(args) {
   if (!isBrowserRun(args)) return false;
   if (process.env.ORACLE_BROWSER_ALLOW_CLOSE === "1") return false;
@@ -338,14 +350,75 @@ function outputTokensForSession(meta) {
   return values.length ? Math.max(...values) : null;
 }
 
-function shouldRejectSuspiciousCompletedAnswer(meta, args) {
+function transcriptAnswerText(sessionDir) {
+  if (!sessionDir) return null;
+  const transcriptPath = join(sessionDir, "artifacts", "transcript.md");
+  if (!existsSync(transcriptPath)) return null;
+  const transcript = readFileSync(transcriptPath, "utf8");
+  const marker = "\n## Answer\n\n";
+  const index = transcript.indexOf(marker);
+  return (index >= 0 ? transcript.slice(index + marker.length) : transcript).trim();
+}
+
+function answerCharsForSession(meta, sessionDir) {
+  const transcriptAnswer = transcriptAnswerText(sessionDir);
+  const values = [
+    meta?.answerChars,
+    meta?.response?.answerChars,
+    ...(Array.isArray(meta?.models) ? meta.models.map((model) => model?.answerChars ?? model?.response?.answerChars) : []),
+    transcriptAnswer?.length,
+  ].map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  return values.length ? Math.max(...values) : null;
+}
+
+function shouldRejectSuspiciousCompletedAnswer(meta, args, sessionDir) {
   if (meta?.status !== "completed") return false;
   const outputTokens = outputTokensForSession(meta);
-  if (outputTokens === null || outputTokens > 8) return false;
-  const prompt = promptForArgs(args);
+  const answerChars = answerCharsForSession(meta, sessionDir);
+  if (outputTokens !== null && outputTokens > 8) return false;
+  if (answerChars !== null && answerChars > 80) return false;
+  if (outputTokens === null && answerChars === null) return false;
+  const prompt = promptForArgs(args) || sessionPrompt(meta);
   const inputTokens = Number(meta?.usage?.inputTokens ?? 0) || Number(meta?.models?.[0]?.usage?.inputTokens ?? 0) || 0;
   const reviewLike = /review|검토|리뷰|계획|architecture|production|상용|품질/i.test(prompt);
   return inputTokens >= 1000 || prompt.length >= 500 || reviewLike;
+}
+
+function markSuspiciousCompletedAnswer(oracleHome, sessionId, meta, sessionDir) {
+  if (!sessionId || !meta) return;
+  const completedAt = new Date().toISOString();
+  const answerText = transcriptAnswerText(sessionDir);
+  const nextMeta = {
+    ...meta,
+    status: "error",
+    completedAt,
+    updatedAt: completedAt,
+    errorMessage: "Completed browser session produced a suspiciously short answer.",
+    response: { status: "error", incompleteReason: "suspicious-short-answer" },
+    error: {
+      category: "browser-automation",
+      message: "Completed browser session produced a suspiciously short answer.",
+      details: {
+        code: "suspicious-short-answer",
+        answerChars: answerText?.length ?? null,
+        answerPreview: answerText?.slice(0, 160),
+      },
+    },
+    models: Array.isArray(meta.models)
+      ? meta.models.map((model) => ({
+          ...model,
+          status: "error",
+          completedAt,
+          response: { status: "error", incompleteReason: "suspicious-short-answer" },
+          error: {
+            category: "browser-automation",
+            message: "Completed browser session produced a suspiciously short answer.",
+            details: { code: "suspicious-short-answer" },
+          },
+        }))
+      : meta.models,
+  };
+  writeJson(join(oracleHome, "sessions", sessionId, "meta.json"), nextMeta);
 }
 
 function submitLiveChatGptSession(sessionId) {
@@ -675,20 +748,36 @@ function runOracleCli(args, extraEnv = {}) {
 
 const runStartedAtMs = Date.now();
 const run = runOracleCli(cliArgs);
+handleSessionRender(cliArgs, run.status);
 
 function handleSuccessfulBrowserRun(args, startedAtMs) {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const session = browserSessionForRun(oracleHome, args, startedAtMs);
   if (session?.meta?.status === "completed") {
-    if (shouldRejectSuspiciousCompletedAnswer(session.meta, args)) {
+    if (shouldRejectSuspiciousCompletedAnswer(session.meta, args, session.sessionDir)) {
       console.error(`[oracle-wrapper] completed browser session ${session.sessionId} produced a suspiciously short answer; rendering transcript and failing so callers do not treat it as valid.`);
       renderSession(session.sessionId);
+      markSuspiciousCompletedAnswer(oracleHome, session.sessionId, session.meta, session.sessionDir);
       process.exit(3);
     }
     if (process.env.ORACLE_RENDER_COMPLETED_BROWSER === "1") {
       renderSession(session.sessionId);
     }
   }
+}
+
+function handleSessionRender(args, status) {
+  if ((status ?? 1) !== 0 || !isSessionRender(args)) return;
+  const sessionId = sessionIdForSessionCommand(args);
+  if (!sessionId) return;
+  const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+  const sessionDir = join(oracleHome, "sessions", sessionId);
+  const meta = readSessionMeta(oracleHome, sessionId);
+  if (!meta || !(meta.mode === "browser" || meta.engine === "browser")) return;
+  if (!shouldRejectSuspiciousCompletedAnswer(meta, args, sessionDir)) return;
+  console.error(`[oracle-wrapper] rendered browser session ${sessionId} produced a suspiciously short answer; marking it invalid.`);
+  markSuspiciousCompletedAnswer(oracleHome, sessionId, meta, sessionDir);
+  process.exit(3);
 }
 
 function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
