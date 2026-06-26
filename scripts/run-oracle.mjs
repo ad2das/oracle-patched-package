@@ -30,6 +30,18 @@ function isBrowserRun(args) {
   return argValue(args, "--engine") === "browser" || argValue(args, "-e") === "browser";
 }
 
+function shouldDefaultKeepBrowser(args) {
+  if (!isBrowserRun(args)) return false;
+  if (process.env.ORACLE_BROWSER_ALLOW_CLOSE === "1") return false;
+  if (args.includes("--browser-keep-browser")) return false;
+  if (args.includes("--browser-attach-running")) return false;
+  return true;
+}
+
+function withDefaultKeepBrowser(args) {
+  return shouldDefaultKeepBrowser(args) ? [...args, "--browser-keep-browser"] : args;
+}
+
 function readJson(filePath) {
   try {
     return JSON.parse(readFileSync(filePath, "utf8"));
@@ -624,7 +636,7 @@ function findActiveBrowserRecoveryState() {
   return null;
 }
 
-const cliArgs = process.argv.slice(2);
+const cliArgs = withDefaultKeepBrowser(process.argv.slice(2));
 if (cliArgs[0] === "status" || isBrowserRun(cliArgs)) {
   reconcileNotSubmittedBrowserSessions();
 }
