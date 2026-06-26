@@ -113,7 +113,72 @@ function persistLiveState(output) {
   writeJsonIfPossible(path.join(oracleHomeDir(), "live-chatgpt-state.json"), state);
   if (output.session) {
     writeJsonIfPossible(path.join(oracleHomeDir(), "sessions", output.session, "live-state.json"), state);
+    reviveSessionMetaFromLiveConversation(output.session, output, state, sessionMeta);
   }
+}
+
+function conversationIdFromUrl(value) {
+  const match = String(value ?? "").match(/chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)([^/?#]+)/i);
+  return match?.[1];
+}
+
+function reviveSessionMetaFromLiveConversation(session, output, state, sessionMeta) {
+  if (!session || !sessionMeta) return;
+  const liveUrl = output.url || output.tabUrl;
+  if (!/chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(liveUrl ?? ""))) return;
+  if (!output.sessionMatch?.matched && !output.promptMatch) return;
+
+  const metaPath = path.join(oracleHomeDir(), "sessions", session, "meta.json");
+  const runtime = sessionMeta.browser?.runtime ?? {};
+  const shouldRevive =
+    sessionMeta.status === "running" ||
+    (
+      sessionMeta.status === "error" &&
+      (
+        sessionMeta.response?.incompleteReason === "not-submitted" ||
+        /Attachments did not finish uploading before timeout|not-submitted/i.test(String(sessionMeta.errorMessage ?? ""))
+      )
+    );
+  if (!shouldRevive) return;
+
+  const now = state.observedAt || new Date().toISOString();
+  const nextRuntime = {
+    ...runtime,
+    promptSubmitted: true,
+    tabUrl: liveUrl,
+    conversationId: conversationIdFromUrl(liveUrl) ?? runtime.conversationId,
+    chromePort: output.port ? Number(output.port) || output.port : runtime.chromePort,
+    chromeTargetId: output.tabId ?? runtime.chromeTargetId,
+  };
+  const completed = !output.generating && Number(output.length ?? 0) > 0;
+  const nextStatus = completed ? "completed" : "running";
+  const nextResponse = completed
+    ? { status: "completed", incompleteReason: "live-conversation-recovered" }
+    : { status: "running", incompleteReason: "live-conversation-recovered" };
+  const nextMeta = {
+    ...sessionMeta,
+    status: nextStatus,
+    browser: {
+      ...sessionMeta.browser,
+      runtime: nextRuntime,
+    },
+    response: nextResponse,
+    errorMessage: undefined,
+    completedAt: completed ? now : sessionMeta.completedAt,
+    updatedAt: now,
+    models: Array.isArray(sessionMeta.models)
+      ? sessionMeta.models.map((model) => model.status === "running" || model.status === "pending" || model.response?.incompleteReason === "not-submitted"
+        ? {
+            ...model,
+            status: nextStatus,
+            completedAt: completed ? now : model.completedAt,
+            response: nextResponse,
+            error: undefined,
+          }
+        : model)
+      : sessionMeta.models,
+  };
+  writeJsonIfPossible(metaPath, nextMeta);
 }
 
 function clearLiveStateAfterFailedRead(attempts) {
@@ -330,8 +395,17 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
   const targetUrl = String(target?.url ?? "");
   const valueUrl = String(value?.url ?? "");
   const urls = `${targetUrl}\n${valueUrl}`;
-  if (runtime?.chromeTargetId && target?.id === runtime.chromeTargetId) {
-    return { matched: true, reason: "chromeTargetId" };
+  const liveConversationUrl = /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(`${targetUrl}\n${valueUrl}`);
+  const hasSubmittedRuntime = Boolean(runtime?.promptSubmitted || runtime?.conversationId || runtime?.tabUrl);
+  const expectedConversationId = runtime?.conversationId;
+  const actualConversationId = conversationIdFromUrl(valueUrl) || conversationIdFromUrl(targetUrl);
+  if (expectedConversationId && actualConversationId && expectedConversationId !== actualConversationId) {
+    return {
+      matched: false,
+      reason: "conversationId-mismatch",
+      expected: { conversationId: expectedConversationId, tabUrl: runtime?.tabUrl },
+      actual: { conversationId: actualConversationId, tabId: target?.id, tabTitle: target?.title, tabUrl: targetUrl, url: valueUrl },
+    };
   }
   if (runtime?.conversationId && urls.includes(runtime.conversationId)) {
     return { matched: true, reason: "conversationId" };
@@ -339,12 +413,15 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
   if (runtime?.tabUrl && (targetUrl === runtime.tabUrl || valueUrl === runtime.tabUrl)) {
     return { matched: true, reason: "tabUrl" };
   }
+  if (runtime?.chromeTargetId && target?.id === runtime.chromeTargetId) {
+    return { matched: true, reason: "chromeTargetId" };
+  }
   const liveState = readJson(path.join(oracleHomeDir(), "sessions", sessionId, "live-state.json"));
   const liveUrl = String(liveState?.url || liveState?.tabUrl || "");
   if (liveUrl && (targetUrl === liveUrl || valueUrl === liveUrl)) {
     return { matched: true, reason: "liveStateUrl" };
   }
-  if (value?.promptMatch) {
+  if (value?.promptMatch && (!liveConversationUrl || hasSubmittedRuntime)) {
     return { matched: true, reason: "promptFingerprint" };
   }
   return {

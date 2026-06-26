@@ -450,7 +450,7 @@ function recoverableDisconnectedGeneratingState(state, meta, sessionDir) {
   const hasConversationUrl = isChatGptConversationUrl(stateUrl);
   const hasLogEvidence = sessionDir ? Boolean(submittedLogObservedAt(sessionDir, Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000))) : false;
   if (!hasConversationUrl && !hasLogEvidence) return null;
-  if (isTerminalSession(meta) && !hasRecoverableGeneratingConversation(state, meta) && !hasLogEvidence) return null;
+  if (isTerminalSession(meta) && !hasRecoverableGeneratingConversation(state, meta)) return null;
   return {
     url: stateUrl,
     title: state.title || state.tabTitle || meta?.options?.slug || meta?.promptPreview,
@@ -472,12 +472,21 @@ function reconcileNotSubmittedBrowserSessions() {
     const metaPath = join(sessionDir, "meta.json");
     const meta = readJson(metaPath);
     if (meta?.status !== "running" || (meta.mode !== "browser" && meta.engine !== "browser")) continue;
+    const modelStates = Array.isArray(meta.models)
+      ? meta.models.map((model) => {
+          const sidecar = readJson(join(sessionDir, model.log?.path ? dirname(model.log.path) : "models", `${model.model}.json`));
+          return sidecar ?? model;
+        })
+      : [];
+    const allModelsNotSubmitted = modelStates.length > 0 && modelStates.every((model) =>
+      model?.status === "error" && model?.response?.incompleteReason === "not-submitted"
+    );
     const runtime = meta.browser?.runtime;
     // A live Chrome process alone does not mean the request is running. The
     // controller is the process that can still type/submit/capture. If it died
     // before promptSubmitted=true, treat the browser tab as abandoned instead
     // of blocking future runs forever.
-    if (isProcessAlive(runtime?.controllerPid)) continue;
+    if (!allModelsNotSubmitted && isProcessAlive(runtime?.controllerPid)) continue;
     if (runtime?.promptSubmitted === true || isChatGptConversationUrl(runtime?.tabUrl) || runtime?.conversationId) continue;
     const liveState = readJson(join(sessionDir, "live-state.json"));
     const liveUrl = liveState?.url || liveState?.tabUrl;
@@ -489,7 +498,7 @@ function reconcileNotSubmittedBrowserSessions() {
     } catch {
       outputSize = 0;
     }
-    if (hasSubmittedLogEvidence(sessionDir)) continue;
+    if (!allModelsNotSubmitted && hasSubmittedLogEvidence(sessionDir)) continue;
     const completedAt = new Date().toISOString();
     const nextMeta = {
       ...meta,
@@ -544,17 +553,6 @@ function findActiveBrowserRecoveryState() {
       observedAt: confirmedLiveState.observedAt,
     };
   }
-  const liveStateSessionDir = liveState?.session ? join(oracleHome, "sessions", liveState.session) : null;
-  const disconnectedLiveState = recoverableDisconnectedGeneratingState(liveState, liveStateMeta, liveStateSessionDir);
-  if (disconnectedLiveState) {
-    return {
-      reason: "ChatGPT generation evidence is preserved even though Chrome is no longer reachable",
-      session: liveState.session,
-      title: disconnectedLiveState.title,
-      url: disconnectedLiveState.url,
-      observedAt: disconnectedLiveState.observedAt,
-    };
-  }
 
   const sessionsDir = join(oracleHome, "sessions");
   if (!existsSync(sessionsDir)) return null;
@@ -577,16 +575,6 @@ function findActiveBrowserRecoveryState() {
         observedAt: confirmedSessionLiveState.observedAt,
       };
     }
-    const disconnectedSessionState = recoverableDisconnectedGeneratingState(sessionLiveState, meta, sessionDir);
-    if (disconnectedSessionState) {
-      return {
-        reason: "session has preserved ChatGPT generation evidence even though Chrome is no longer reachable",
-        session: sessionId,
-        title: disconnectedSessionState.title,
-        url: disconnectedSessionState.url,
-        observedAt: disconnectedSessionState.observedAt,
-      };
-    }
 
     if (isTerminalSession(meta)) continue;
 
@@ -599,18 +587,15 @@ function findActiveBrowserRecoveryState() {
       if (liveRead?.ok && !liveRead.value?.generating) {
         continue;
       }
-      const logObservedAt = submittedLogObservedAt(sessionDir, maxAgeMs);
-      if (!controllerAlive && !(liveRead?.ok && liveRead.value?.generating && isChatGptConversationUrl(liveUrl)) && !logObservedAt) {
+      if (!controllerAlive && !(liveRead?.ok && liveRead.value?.generating && isChatGptConversationUrl(liveUrl))) {
         continue;
       }
       return {
-        reason: logObservedAt && !controllerAlive && !chromePortOpen
-          ? "stored browser session has submitted ChatGPT generation evidence but Chrome is no longer reachable"
-          : "stored browser session is still running",
+        reason: "stored browser session is still running",
         session: sessionId,
         title: meta.options?.slug || meta.promptPreview,
         url: liveUrl || meta.browser?.runtime?.tabUrl,
-        observedAt: logObservedAt || meta.updatedAt || meta.createdAt,
+        observedAt: meta.updatedAt || meta.createdAt,
       };
     }
 
@@ -619,8 +604,11 @@ function findActiveBrowserRecoveryState() {
       const logStat = statSync(logPath);
       if (Date.now() - logStat.mtimeMs > maxAgeMs) continue;
       const logTail = readFileSync(logPath, "utf8").slice(-12000);
-      if (/ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true/i.test(logTail)) {
-        const runtime = meta?.browser?.runtime;
+      const runtime = meta?.browser?.runtime;
+      if (
+        isLocalPortOpen(runtime?.chromePort)
+        && /ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true/i.test(logTail)
+      ) {
         return {
           reason: "recent session log indicates ChatGPT was generating even if Chrome is no longer reachable",
           session: sessionId,
