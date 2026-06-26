@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,7 +61,80 @@ function readSessionMeta(oracleHome, sessionId) {
   return readJson(join(oracleHome, "sessions", sessionId, "meta.json"));
 }
 
+function writeJson(filePath, value) {
+  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function isChatGptConversationUrl(value) {
+  return /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(value ?? ""));
+}
+
+function reconcileNotSubmittedBrowserSessions() {
+  const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+  const sessionsDir = join(oracleHome, "sessions");
+  if (!existsSync(sessionsDir)) return;
+  for (const sessionId of readdirSync(sessionsDir)) {
+    const sessionDir = join(sessionsDir, sessionId);
+    try {
+      if (!statSync(sessionDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const metaPath = join(sessionDir, "meta.json");
+    const meta = readJson(metaPath);
+    if (meta?.status !== "running" || (meta.mode !== "browser" && meta.engine !== "browser")) continue;
+    const runtime = meta.browser?.runtime;
+    if (runtime?.promptSubmitted === true || isChatGptConversationUrl(runtime?.tabUrl) || runtime?.conversationId) continue;
+    const liveState = readJson(join(sessionDir, "live-state.json"));
+    const liveUrl = liveState?.url || liveState?.tabUrl;
+    if (liveState?.generating || isChatGptConversationUrl(liveUrl)) continue;
+    const outputLog = join(sessionDir, "output.log");
+    let outputSize = 0;
+    try {
+      outputSize = statSync(outputLog).size;
+    } catch {
+      outputSize = 0;
+    }
+    const completedAt = new Date().toISOString();
+    const nextMeta = {
+      ...meta,
+      status: "error",
+      completedAt,
+      errorMessage: "ChatGPT browser session did not submit a prompt or create a conversation.",
+      response: { status: "error", incompleteReason: "not-submitted" },
+      error: {
+        category: "browser-automation",
+        message: "ChatGPT browser session did not submit a prompt or create a conversation.",
+        details: {
+          stage: "submit-prompt",
+          code: "not-submitted",
+          runtime,
+          liveState,
+          outputSize,
+        },
+      },
+      models: Array.isArray(meta.models)
+        ? meta.models.map((model) => model.status === "running" || model.status === "pending"
+          ? {
+              ...model,
+              status: "error",
+              completedAt,
+              response: { status: "error", incompleteReason: "not-submitted" },
+              error: {
+                category: "browser-automation",
+                message: "ChatGPT browser session did not submit a prompt or create a conversation.",
+                details: { stage: "submit-prompt", code: "not-submitted" },
+              },
+            }
+          : model)
+        : meta.models,
+    };
+    writeJson(metaPath, nextMeta);
+  }
+}
+
 function findActiveBrowserRecoveryState() {
+  reconcileNotSubmittedBrowserSessions();
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const maxAgeMs = Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000);
   const liveState = readJson(join(oracleHome, "live-chatgpt-state.json"));
@@ -139,6 +212,9 @@ function findActiveBrowserRecoveryState() {
 }
 
 const cliArgs = process.argv.slice(2);
+if (cliArgs[0] === "status" || isBrowserRun(cliArgs)) {
+  reconcileNotSubmittedBrowserSessions();
+}
 if (
   isBrowserRun(cliArgs) &&
   !cliArgs.includes("--force") &&

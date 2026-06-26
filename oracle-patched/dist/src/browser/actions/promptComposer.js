@@ -389,10 +389,6 @@ export function buildAttachmentReadyExpressionForTest(attachmentNames) {
     return buildAttachmentReadyExpression(attachmentNames);
 }
 async function attemptSendButton(Runtime, _logger, attachmentNames) {
-    const needAttachment = Array.isArray(attachmentNames) && attachmentNames.length > 0;
-    if (needAttachment) {
-        return false;
-    }
     const script = `(() => {
     ${buildClickDispatcher()}
     const selectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};

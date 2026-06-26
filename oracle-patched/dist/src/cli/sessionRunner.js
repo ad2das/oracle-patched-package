@@ -499,6 +499,39 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             return;
         }
         if (attachmentUploadTimeout && mode === "browser") {
+            const runtime = userError.details?.runtime ?? sessionMeta.browser?.runtime;
+            if (!hasRecoverableChatGptConversation(runtime) && runtime?.promptSubmitted !== true) {
+                log(dim("Attachment upload readiness timed out before a ChatGPT conversation was created; marking session error."));
+                if (modelForStatus) {
+                    await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
+                        status: "error",
+                        completedAt: new Date().toISOString(),
+                        response: { status: "error", incompleteReason: "not-submitted" },
+                        error: {
+                            category: userError.category,
+                            message: userError.message,
+                            details: userError.details,
+                        },
+                    });
+                }
+                await sessionStore.updateSession(sessionMeta.id, {
+                    status: "error",
+                    completedAt: new Date().toISOString(),
+                    errorMessage: message,
+                    mode,
+                    browser: {
+                        config: browserConfig,
+                        runtime,
+                    },
+                    response: { status: "error", incompleteReason: "not-submitted" },
+                    error: {
+                        category: userError.category,
+                        message: userError.message,
+                        details: userError.details,
+                    },
+                });
+                throw error;
+            }
             log(dim("Attachment upload readiness timed out; keeping session running because ChatGPT may still have submitted or be generating."));
             if (modelForStatus) {
                 await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
@@ -519,7 +552,7 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
                 mode,
                 browser: {
                     config: browserConfig,
-                    runtime: userError.details?.runtime ?? sessionMeta.browser?.runtime,
+                    runtime,
                 },
                 response: { status: "running", incompleteReason: "attachment-upload-timeout" },
                 error: {
