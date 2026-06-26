@@ -38,6 +38,9 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Browser failures that verify as `not_submitted` and cannot be live-submitted automatically retry the original Oracle CLI command once.
 - Session-scoped live recovery rejects unrelated ChatGPT tabs unless they match the requested Oracle session by Chrome target id, conversation id/URL, persisted live-state URL, or the original prompt fingerprint.
 - Submission verification treats session logs showing ChatGPT response activity (`ChatGPT thinking`, `status=active`, stop-generating/finalizing signals) as submitted evidence even when `promptSubmitted=false` or the conversation URL was not persisted before a disconnect.
+- Browser failure recovery now matches the session for the current prompt/run instead of blindly using the newest browser session.
+- If a matched browser session completed despite a CLI failure/interruption, the wrapper renders `session <id> --render` immediately to recover the answer.
+- Long review-style browser runs that complete with a suspiciously tiny answer are rejected after rendering the transcript, so callers do not treat outputs like `I` as valid reviews.
 
 ## Recommended Commands
 
@@ -75,6 +78,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - If a session log already shows ChatGPT response activity, treat the request as submitted even if runtime metadata still says `promptSubmitted=false`; recover or poll that session instead of relaunching.
 - Do not treat `Attachments did not finish uploading before timeout` as proof that the prompt was not submitted. First inspect the actual ChatGPT tab/conversation; files may be attached and the assistant may already be generating.
 - If a browser run times out, disconnects, or reports `error`, first run `scripts/run-oracle.mjs session <id> --render`. This can reopen the saved ChatGPT conversation, save the transcript artifact, and mark the session completed.
+- If the wrapper says a matched session completed, use the rendered answer it prints; do not start a duplicate run. If the wrapper rejects a suspiciously tiny completed answer, treat that session as invalid and rerun with a smaller prompt/file set.
 - For browser review/check/audit prompts, rely on the latest assistant turn after the latest user prompt. If the transcript does not match the actual ChatGPT conversation, recover the same session with `session <id> --render` or `read-live-chatgpt.mjs --session <id>` and verify the page before using the artifact.
 - First check whether the Oracle Chrome process still exists and has a `--remote-debugging-port`; if so, read the live ChatGPT tab with `scripts/read-live-chatgpt.mjs --session <id>`. Treat a failed session-scoped read as inconclusive; do not substitute a different visible ChatGPT tab unless it has explicit session evidence. If the recovered text still says `Pro thinking`, `Finalizing answer`, `Thinking`, or `Stop generating`, wait and poll the live tab instead of starting a new Oracle request.
 - Prefer the live-tab recovery script over launching another Oracle run when the user can see Chrome still generating. Starting another run can duplicate requests and confuse which answer should be used.

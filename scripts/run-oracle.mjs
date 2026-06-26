@@ -86,6 +86,44 @@ function newestBrowserSession(oracleHome) {
   return null;
 }
 
+function normalizePrompt(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function promptForArgs(args) {
+  return normalizePrompt(argValue(args, "--prompt") || argValue(args, "-p") || argValue(args, "--message"));
+}
+
+function sessionPrompt(meta) {
+  return normalizePrompt(
+    meta?.browser?.preparedSubmission?.prompt ||
+    meta?.options?.preparedSubmission?.prompt ||
+    meta?.options?.prompt ||
+    meta?.promptPreview
+  );
+}
+
+function browserSessionForRun(oracleHome, args, startedAtMs = 0) {
+  const prompt = promptForArgs(args);
+  const promptPrefix = prompt.slice(0, 160);
+  const candidates = listSessionDirs(oracleHome)
+    .map((item) => {
+      const meta = readSessionMeta(oracleHome, item.sessionId);
+      return meta?.mode === "browser" || meta?.engine === "browser" ? { ...item, meta } : null;
+    })
+    .filter(Boolean);
+  if (promptPrefix) {
+    const matched = candidates.find((item) => {
+      const createdAt = Date.parse(item.meta?.createdAt ?? "");
+      const freshEnough = !Number.isFinite(createdAt) || !startedAtMs || createdAt >= startedAtMs - 5 * 60 * 1000;
+      return freshEnough && sessionPrompt(item.meta).includes(promptPrefix);
+    });
+    if (matched) return matched;
+  }
+  const afterStart = candidates.find((item) => !startedAtMs || item.mtimeMs >= startedAtMs - 5_000);
+  return afterStart ?? candidates[0] ?? null;
+}
+
 function hasSubmittedRuntime(runtime) {
   return Boolean(
     runtime?.promptSubmitted === true ||
@@ -150,13 +188,21 @@ function readLiveSessionJson(sessionId) {
   }
 }
 
-function verifyLatestBrowserSubmissionAfterFailure() {
+function verifyBrowserSubmissionAfterFailure(args, startedAtMs) {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
-  const latest = newestBrowserSession(oracleHome);
+  const latest = browserSessionForRun(oracleHome, args, startedAtMs) ?? newestBrowserSession(oracleHome);
   if (!latest) return { state: "unknown", reason: "no browser session found" };
 
   const runtime = latest.meta?.browser?.runtime;
   const liveState = readJson(join(latest.sessionDir, "live-state.json"));
+  if (latest.meta?.status === "completed") {
+    return {
+      state: "completed",
+      session: latest.sessionId,
+      reason: "matched browser session is already completed; render/recover its answer",
+      usage: latest.meta?.usage,
+    };
+  }
   if (hasSubmittedRuntime(runtime)) {
     return {
       state: "submitted",
@@ -218,6 +264,20 @@ function verifyLatestBrowserSubmissionAfterFailure() {
       liveRead,
     };
   }
+  if (
+    latest.meta?.status === "error" &&
+    !hasSubmittedRuntime(runtime) &&
+    !hasSubmittedLogEvidence(latest.sessionDir) &&
+    !isChatGptConversationUrl(liveState?.url || liveState?.tabUrl) &&
+    sessionPrompt(latest.meta)
+  ) {
+    return {
+      state: "not_submitted",
+      session: latest.sessionId,
+      reason: "matched browser session errored before any submitted runtime, live-state, or generation evidence",
+      liveRead,
+    };
+  }
 
   return {
     state: "unknown",
@@ -225,6 +285,34 @@ function verifyLatestBrowserSubmissionAfterFailure() {
     reason: "CLI failed and live verification could not prove submitted or not_submitted",
     liveRead,
   };
+}
+
+function renderSession(sessionId) {
+  if (!sessionId) return { ok: false, reason: "no session id" };
+  const result = spawnSync(process.execPath, [oracleCli, "session", sessionId, "--render"], {
+    cwd: process.cwd(),
+    stdio: "inherit",
+    env: process.env,
+  });
+  return { ok: result.status === 0, status: result.status };
+}
+
+function outputTokensForSession(meta) {
+  const values = [
+    meta?.usage?.outputTokens,
+    ...(Array.isArray(meta?.models) ? meta.models.map((model) => model?.usage?.outputTokens) : []),
+  ].map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  return values.length ? Math.max(...values) : null;
+}
+
+function shouldRejectSuspiciousCompletedAnswer(meta, args) {
+  if (meta?.status !== "completed") return false;
+  const outputTokens = outputTokensForSession(meta);
+  if (outputTokens === null || outputTokens > 8) return false;
+  const prompt = promptForArgs(args);
+  const inputTokens = Number(meta?.usage?.inputTokens ?? 0) || Number(meta?.models?.[0]?.usage?.inputTokens ?? 0) || 0;
+  const reviewLike = /review|검토|리뷰|계획|architecture|production|상용|품질/i.test(prompt);
+  return inputTokens >= 1000 || prompt.length >= 500 || reviewLike;
 }
 
 function submitLiveChatGptSession(sessionId) {
@@ -525,13 +613,34 @@ function runOracleCli(args, extraEnv = {}) {
   });
 }
 
+const runStartedAtMs = Date.now();
 const run = runOracleCli(cliArgs);
 
-if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
-  const verification = verifyLatestBrowserSubmissionAfterFailure();
+function handleSuccessfulBrowserRun(args, startedAtMs) {
+  const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+  const session = browserSessionForRun(oracleHome, args, startedAtMs);
+  if (session?.meta?.status === "completed") {
+    if (shouldRejectSuspiciousCompletedAnswer(session.meta, args)) {
+      console.error(`[oracle-wrapper] completed browser session ${session.sessionId} produced a suspiciously short answer; rendering transcript and failing so callers do not treat it as valid.`);
+      renderSession(session.sessionId);
+      process.exit(3);
+    }
+    if (process.env.ORACLE_RENDER_COMPLETED_BROWSER === "1") {
+      renderSession(session.sessionId);
+    }
+  }
+}
+
+function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
+  const verification = verifyBrowserSubmissionAfterFailure(args, startedAtMs);
   console.error(`[oracle-wrapper] post-failure submission verification: ${JSON.stringify(verification)}`);
-  if (verification.state === "submitted") {
+  if (verification.state === "completed") {
+    console.error("[oracle-wrapper] The matched browser session completed despite the CLI failure. Rendering/recovering the answer now.");
+    const rendered = renderSession(verification.session);
+    process.exit(rendered.ok ? 0 : (rendered.status ?? 1));
+  } else if (verification.state === "submitted") {
     console.error("[oracle-wrapper] The browser command failed, but the prompt appears submitted. Do not retry blindly; recover/read this session first.");
+    console.error(`[oracle-wrapper] Recover now with: node "${join(scriptDir, "run-oracle.mjs")}" session "${verification.session}" --render`);
   } else if (verification.state === "not_submitted") {
     console.error("[oracle-wrapper] The prompt appears not submitted after live verification. Attempting automatic live-submit recovery.");
     const recovery = submitLiveChatGptSession(verification.session);
@@ -547,15 +656,29 @@ if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
       console.error("[oracle-wrapper] The prompt was submitted by recovery. Do not start a duplicate request; read/recover this session for the answer.");
       process.exit(0);
     }
-    if (process.env.ORACLE_SKIP_NOT_SUBMITTED_RETRY !== "1") {
+    if (allowRetry && process.env.ORACLE_SKIP_NOT_SUBMITTED_RETRY !== "1") {
       console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once because submission was verified not_submitted.");
-      const retry = runOracleCli(cliArgs, { ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1" });
+      const retryStartedAtMs = Date.now();
+      const retry = runOracleCli(args, { ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1" });
+      if ((retry.status ?? 1) === 0) {
+        handleSuccessfulBrowserRun(args, retryStartedAtMs);
+        process.exit(0);
+      }
+      handleFailedBrowserRun(args, retryStartedAtMs, false);
       process.exit(retry.status ?? 1);
     }
     console.error("[oracle-wrapper] Automatic recovery did not submit the prompt after the one allowed retry.");
   } else {
     console.error("[oracle-wrapper] Submission state is unknown. Inspect the live browser/session before retrying.");
   }
+}
+
+if (isBrowserRun(cliArgs) && (run.status ?? 0) === 0) {
+  handleSuccessfulBrowserRun(cliArgs, runStartedAtMs);
+}
+
+if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
+  handleFailedBrowserRun(cliArgs, runStartedAtMs, true);
 }
 
 process.exit(run.status ?? 1);

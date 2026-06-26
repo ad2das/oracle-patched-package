@@ -317,6 +317,31 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
   };
 }
 
+async function readTarget({ target, port, sessionMeta, sessionRuntime, needles, opened }) {
+  const value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars, needles));
+  const sessionMatch = sessionMatchEvidence({
+    target,
+    value,
+    meta: sessionMeta,
+    runtime: sessionRuntime,
+  });
+  return {
+    output: {
+      port,
+      session: sessionId,
+      sessionStatus: sessionMeta?.status,
+      sessionError: sessionMeta?.errorMessage,
+      sessionMatch,
+      opened,
+      tabTitle: target.title,
+      tabUrl: target.url,
+      tabId: target.id,
+      ...value,
+    },
+    sessionMatch,
+  };
+}
+
 async function main() {
   const ports = discoverPorts();
   const sessionMeta = readSessionMeta(sessionId);
@@ -346,35 +371,37 @@ async function main() {
         });
         continue;
       }
-      const value = await cdpEvaluate(target.webSocketDebuggerUrl, buildDomProbeExpression(tailChars, needles));
-      const sessionMatch = sessionMatchEvidence({
+      let read = await readTarget({
         target,
-        value,
-        meta: sessionMeta,
-        runtime: sessionRuntime,
+        port,
+        sessionMeta,
+        sessionRuntime,
+        needles,
+        opened,
       });
-      if (!sessionMatch.matched) {
+      if (!read.sessionMatch.matched && sessionTabUrl && !opened && !noOpenMissing) {
+        const openedTarget = await openSessionTab(port, sessionTabUrl);
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        read = await readTarget({
+          target: openedTarget,
+          port,
+          sessionMeta,
+          sessionRuntime,
+          needles,
+          opened: true,
+        });
+      }
+      if (!read.sessionMatch.matched) {
         attempts.push({
           port,
           error: "matched ChatGPT tab does not belong to requested Oracle session",
           session: sessionId,
-          sessionMatch,
+          sessionMatch: read.sessionMatch,
           tabs: tabs.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url })).slice(0, 10),
         });
         continue;
       }
-      const output = {
-        port,
-        session: sessionId,
-        sessionStatus: sessionMeta?.status,
-        sessionError: sessionMeta?.errorMessage,
-        sessionMatch,
-        opened,
-        tabTitle: target.title,
-        tabUrl: target.url,
-        tabId: target.id,
-        ...value,
-      };
+      const output = read.output;
       persistLiveState(output);
       if (jsonOnly) {
         console.log(JSON.stringify(output, null, 2));
