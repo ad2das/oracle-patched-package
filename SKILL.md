@@ -45,6 +45,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Browser recovery treats recent ChatGPT generation logs as submitted/recoverable even when Chrome or the DevTools port disappeared, because the server-side conversation may still be generating or may have completed after local Chrome disconnected.
 - On Windows, browser launch reuses an already-running Oracle Chrome for the same profile instead of launching a duplicate process that immediately exits with `Opening in existing browser session`; launch handoff is recovered by rediscovering the real DevTools port.
 - The wrapper defaults browser runs to `--browser-keep-browser` so Oracle does not close Chrome in `finally`; set `ORACLE_BROWSER_ALLOW_CLOSE=1` only when an intentional one-shot cleanup is desired.
+- `--browser-attach-running --remote-chrome host:port` now falls back to probing `http://host:port/json/version` directly when local `DevToolsActivePort` metadata is missing, so a live Chrome DevTools port is not rejected merely because metadata discovery failed.
 
 ## Recommended Commands
 
