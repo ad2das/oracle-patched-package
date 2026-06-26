@@ -69,6 +69,19 @@ function isChatGptConversationUrl(value) {
   return /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(value ?? ""));
 }
 
+function isProcessAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  const probe = spawnSync(
+    process.platform === "win32" ? "powershell.exe" : "ps",
+    process.platform === "win32"
+      ? ["-NoProfile", "-Command", `if (Get-Process -Id ${numericPid} -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }`]
+      : ["-p", String(numericPid)],
+    { stdio: "ignore" },
+  );
+  return probe.status === 0;
+}
+
 function reconcileNotSubmittedBrowserSessions() {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
   const sessionsDir = join(oracleHome, "sessions");
@@ -84,6 +97,7 @@ function reconcileNotSubmittedBrowserSessions() {
     const meta = readJson(metaPath);
     if (meta?.status !== "running" || (meta.mode !== "browser" && meta.engine !== "browser")) continue;
     const runtime = meta.browser?.runtime;
+    if (isProcessAlive(runtime?.controllerPid) || isProcessAlive(runtime?.chromePid)) continue;
     if (runtime?.promptSubmitted === true || isChatGptConversationUrl(runtime?.tabUrl) || runtime?.conversationId) continue;
     const liveState = readJson(join(sessionDir, "live-state.json"));
     const liveUrl = liveState?.url || liveState?.tabUrl;
