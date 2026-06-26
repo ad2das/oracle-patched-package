@@ -26,6 +26,15 @@ import { estimateTokenCount } from "../browser/utils.js";
 import { formatElapsed } from "../oracle/format.js";
 const isTty = process.stdout.isTTY;
 const dim = (text) => (isTty ? kleur.dim(text) : text);
+async function hasSubmittedLogEvidence(sessionId) {
+    try {
+        const logText = await sessionStore.readLog(sessionId);
+        return /ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true/i.test(logText);
+    }
+    catch {
+        return false;
+    }
+}
 export async function performSessionRun({ sessionMeta, runOptions, mode, browserConfig, cwd, log, write, version, notifications, browserDeps, muteStdout = false, }) {
     const writeInline = (chunk) => {
         // Keep session logs intact while still echoing inline output to the user.
@@ -413,8 +422,10 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             const runtime = userError.details
                 ?.runtime;
             const recoverableRuntime = runtime ?? sessionMeta.browser?.runtime;
+            const submittedLogEvidence = await hasSubmittedLogEvidence(sessionMeta.id);
             if (!hasRecoverableChatGptConversation(recoverableRuntime) &&
-                recoverableRuntime?.promptSubmitted !== true) {
+                recoverableRuntime?.promptSubmitted !== true &&
+                !submittedLogEvidence) {
                 log(dim("Chrome disconnected before a ChatGPT conversation was created; marking session error."));
                 if (modelForStatus) {
                     await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
@@ -518,7 +529,8 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
         }
         if (attachmentUploadTimeout && mode === "browser") {
             const runtime = userError.details?.runtime ?? sessionMeta.browser?.runtime;
-            if (!hasRecoverableChatGptConversation(runtime) && runtime?.promptSubmitted !== true) {
+            const submittedLogEvidence = await hasSubmittedLogEvidence(sessionMeta.id);
+            if (!hasRecoverableChatGptConversation(runtime) && runtime?.promptSubmitted !== true && !submittedLogEvidence) {
                 log(dim("Attachment upload readiness timed out before a ChatGPT conversation was created; marking session error."));
                 if (modelForStatus) {
                     await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {

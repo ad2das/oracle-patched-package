@@ -178,6 +178,18 @@ function sendExpression() {
 function probeExpression() {
   return `(() => {
     const text = document.body.innerText || '';
+    const composerNodes = [
+      '#prompt-textarea',
+      '[data-testid="prompt-textarea"]',
+      'textarea',
+      '[contenteditable="true"]',
+      '[role="textbox"]'
+    ].flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+    const composer = composerNodes.find((node) => {
+      const rect = node.getBoundingClientRect?.();
+      return rect && rect.width > 0 && rect.height > 0;
+    }) || composerNodes[0];
+    const composerText = composer ? ('value' in composer ? composer.value : composer.innerText || composer.textContent || '') : '';
     const buttons = Array.from(document.querySelectorAll('button,[role="button"]'))
       .map((node) => [node.getAttribute('aria-label'), node.textContent].filter(Boolean).join(' '));
     return {
@@ -185,8 +197,21 @@ function probeExpression() {
       title: document.title,
       generating: buttons.some((label) => /stop generating|stop answering|생성 중지|중지/i.test(label)) || /thinking|finalizing answer|응답 생성|생각 중/i.test(text),
       textLength: text.length,
+      composerLength: composerText.trim().length,
     };
   })()`;
+}
+
+function isConversationUrl(value) {
+  return /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(value ?? ""));
+}
+
+function probeShowsSubmitted(value) {
+  return Boolean(
+    isConversationUrl(value?.url) ||
+    value?.generating ||
+    (Number(value?.composerLength ?? 0) === 0 && Number(value?.textLength ?? 0) > 0)
+  );
 }
 
 const tabs = await listTabs();
@@ -251,7 +276,15 @@ const result = await withCdp(tab.webSocketDebuggerUrl, async (send) => {
       awaitPromise: true,
     });
     const value = probe.result?.result?.value;
-    if (!submittedValue?.submitted || /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(value?.url ?? "")) || value?.generating) {
+    if (probeShowsSubmitted(value)) {
+      if (!submittedValue?.submitted) {
+        submittedValue = {
+          submitted: true,
+          method: "post-submit-probe",
+          reason: submittedValue?.reason,
+          url: value?.url,
+        };
+      }
       break;
     }
   }

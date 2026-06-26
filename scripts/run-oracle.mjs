@@ -94,6 +94,27 @@ function hasSubmittedRuntime(runtime) {
   );
 }
 
+function sessionLogText(sessionDir) {
+  const chunks = [];
+  for (const filePath of [
+    join(sessionDir, "output.log"),
+    join(sessionDir, "models", "gpt-5.5-pro.log"),
+    join(sessionDir, "models", "gpt-5.2-instant.log"),
+  ]) {
+    try {
+      chunks.push(readFileSync(filePath, "utf8").slice(-24000));
+    } catch {
+      // Missing model logs are normal.
+    }
+  }
+  return chunks.join("\n");
+}
+
+function hasSubmittedLogEvidence(sessionDir) {
+  const logText = sessionLogText(sessionDir);
+  return /ChatGPT thinking|status=active|Stop generating|Finalizing answer|generating=true|Waiting for ChatGPT response/i.test(logText);
+}
+
 function readLiveSessionJson(sessionId) {
   const result = spawnSync(process.execPath, [
     join(scriptDir, "read-live-chatgpt.mjs"),
@@ -141,6 +162,15 @@ function verifyLatestBrowserSubmissionAfterFailure() {
       state: "submitted",
       session: latest.sessionId,
       reason: "session runtime recorded promptSubmitted/conversation evidence",
+      url: runtime?.tabUrl,
+      promptSubmitted: runtime?.promptSubmitted,
+    };
+  }
+  if (hasSubmittedLogEvidence(latest.sessionDir)) {
+    return {
+      state: "submitted",
+      session: latest.sessionId,
+      reason: "session log recorded ChatGPT response/generation activity",
       url: runtime?.tabUrl,
       promptSubmitted: runtime?.promptSubmitted,
     };
@@ -322,6 +352,7 @@ function reconcileNotSubmittedBrowserSessions() {
     } catch {
       outputSize = 0;
     }
+    if (hasSubmittedLogEvidence(sessionDir)) continue;
     const completedAt = new Date().toISOString();
     const nextMeta = {
       ...meta,
