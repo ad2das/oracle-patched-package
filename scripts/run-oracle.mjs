@@ -24,6 +24,24 @@ function argValue(args, name) {
   return found ? found.slice(prefix.length) : null;
 }
 
+function hasArg(args, name) {
+  return args.includes(name) || args.some((arg) => arg.startsWith(`${name}=`));
+}
+
+function withoutArgs(args, names) {
+  const result = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const matched = names.find((name) => arg === name || arg.startsWith(`${name}=`));
+    if (matched) {
+      if (arg === matched) index += 1;
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
+}
+
 function isBrowserRun(args) {
   const first = args.find((arg) => !arg.startsWith("-"));
   if (first === "session" || first === "status" || first === "serve" || first === "docs") return false;
@@ -489,6 +507,110 @@ function isLocalPortOpen(port) {
   return probe.status === 0;
 }
 
+function normalizePort(value) {
+  const port = Number(String(value ?? "").trim());
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function addCandidatePort(ports, value) {
+  const port = normalizePort(value);
+  if (port) ports.add(port);
+}
+
+function addPortsFromText(ports, text) {
+  const source = String(text ?? "");
+  for (const match of source.matchAll(/--remote-debugging-port=(\d{2,5})/g)) {
+    addCandidatePort(ports, match[1]);
+  }
+}
+
+function chromeProcessDebugPorts() {
+  const ports = new Set();
+  const oracleProfileNeedle = process.platform === "win32"
+    ? "\\.oracle\\browser-profile"
+    : "/.oracle/browser-profile";
+  const probe = spawnSync(
+    process.platform === "win32" ? "powershell.exe" : "sh",
+    process.platform === "win32"
+      ? [
+          "-NoProfile",
+          "-Command",
+          "Get-CimInstance Win32_Process -Filter \"name = 'chrome.exe'\" | " +
+            "Where-Object { $_.CommandLine -match '--remote-debugging-port=\\d+' -and $_.CommandLine -match '\\\\.oracle\\\\browser-profile' } | " +
+            "ForEach-Object { $_.CommandLine }",
+        ]
+      : ["-c", "ps -eo args= | grep '[c]hrome' | grep -- '--remote-debugging-port=' | grep -- '/.oracle/browser-profile'"],
+    { encoding: "utf8" },
+  );
+  if (probe.status === 0) {
+    addPortsFromText(ports, probe.stdout);
+  }
+  if (ports.size === 0 && oracleProfileNeedle) {
+    addPortsFromText(ports, probe.stderr);
+  }
+  return [...ports];
+}
+
+function sessionCandidateDebugPorts(oracleHome) {
+  const ports = new Set();
+  const liveState = readJson(join(oracleHome, "live-chatgpt-state.json"));
+  addCandidatePort(ports, liveState?.port);
+  for (const item of listSessionDirs(oracleHome).slice(0, 80)) {
+    const meta = readSessionMeta(oracleHome, item.sessionId);
+    addCandidatePort(ports, meta?.browser?.runtime?.chromePort);
+    addCandidatePort(ports, meta?.browser?.config?.remoteChrome?.port);
+    const sessionLiveState = readJson(join(item.sessionDir, "live-state.json"));
+    addCandidatePort(ports, sessionLiveState?.port);
+  }
+  return [...ports];
+}
+
+function browserConnectionPinned(args) {
+  return (
+    hasArg(args, "--browser-attach-running") ||
+    hasArg(args, "--remote-chrome") ||
+    hasArg(args, "--browser-port") ||
+    hasArg(args, "--browser-debug-port") ||
+    hasArg(args, "--browser-headless")
+  );
+}
+
+function discoverAttachableOracleChromePort() {
+  const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+  const ports = [
+    ...chromeProcessDebugPorts(),
+    ...sessionCandidateDebugPorts(oracleHome),
+  ];
+  for (const port of [...new Set(ports)]) {
+    if (isLocalPortOpen(port)) return port;
+  }
+  return null;
+}
+
+function attachRunningArgs(args, port) {
+  const next = withoutArgs(args, [
+    "--browser-keep-browser",
+    "--remote-chrome",
+    "--browser-port",
+    "--browser-debug-port",
+  ]);
+  if (!hasArg(next, "--browser-attach-running")) {
+    next.push("--browser-attach-running");
+  }
+  next.push("--remote-chrome", `127.0.0.1:${port}`);
+  return next;
+}
+
+function maybeAutoAttachBrowserRun(args) {
+  if (!isBrowserRun(args)) return args;
+  if (process.env.ORACLE_DISABLE_AUTO_ATTACH === "1") return args;
+  if (browserConnectionPinned(args)) return args;
+  const port = discoverAttachableOracleChromePort();
+  if (!port) return args;
+  console.error(`[oracle-wrapper] Found live Oracle Chrome DevTools port ${port}; attaching instead of launching a second browser.`);
+  return attachRunningArgs(args, port);
+}
+
 function confirmedActiveGeneratingState(state, meta, sessionId) {
   if (!state?.generating || !recentEnough(state.observedAt, Number(process.env.ORACLE_LIVE_GENERATING_TTL_MS || 2 * 60 * 60 * 1000))) {
     return null;
@@ -697,7 +819,7 @@ function findActiveBrowserRecoveryState() {
   return null;
 }
 
-const cliArgs = withDefaultKeepBrowser(process.argv.slice(2));
+let cliArgs = withDefaultKeepBrowser(process.argv.slice(2));
 if (cliArgs[0] === "status" || isBrowserRun(cliArgs)) {
   reconcileNotSubmittedBrowserSessions();
 }
@@ -725,6 +847,7 @@ if (
     process.exit(2);
   }
 }
+cliArgs = maybeAutoAttachBrowserRun(cliArgs);
 
 if (!existsSync(dependencyProbe)) {
   console.error("Installing patched Oracle runtime dependencies...");
@@ -804,6 +927,28 @@ function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
     if (recovery.ok) {
       console.error("[oracle-wrapper] The prompt was submitted by recovery. Do not start a duplicate request; read/recover this session for the answer.");
       process.exit(0);
+    }
+    if (
+      allowRetry &&
+      process.env.ORACLE_SKIP_ATTACH_FALLBACK_RETRY !== "1" &&
+      !browserConnectionPinned(args)
+    ) {
+      const attachPort = discoverAttachableOracleChromePort();
+      if (attachPort) {
+        const attachArgs = attachRunningArgs(args, attachPort);
+        console.error(`[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once via existing Oracle Chrome DevTools port ${attachPort}.`);
+        const retryStartedAtMs = Date.now();
+        const retry = runOracleCli(attachArgs, {
+          ORACLE_SKIP_ATTACH_FALLBACK_RETRY: "1",
+          ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1",
+        });
+        if ((retry.status ?? 1) === 0) {
+          handleSuccessfulBrowserRun(attachArgs, retryStartedAtMs);
+          process.exit(0);
+        }
+        handleFailedBrowserRun(attachArgs, retryStartedAtMs, false);
+        process.exit(retry.status ?? 1);
+      }
     }
     if (allowRetry && process.env.ORACLE_SKIP_NOT_SUBMITTED_RETRY !== "1") {
       console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once because submission was verified not_submitted.");
