@@ -24,7 +24,7 @@ import { CONSULT_PRESETS, consultInputSchema } from "../types.js";
 import { applyConsultPreset } from "../consultPresets.js";
 import { loadUserConfig } from "../../config.js";
 import { resolveNotificationSettings } from "../../cli/notifier.js";
-import { mapModelToBrowserLabel, resolveBrowserModelLabel } from "../../cli/browserConfig.js";
+import { defaultBrowserThinkingTimeForModel, mapModelToBrowserLabel, resolveBrowserModelLabel, } from "../../cli/browserConfig.js";
 // Use raw shapes so the MCP SDK (with its bundled Zod) wraps them and emits valid JSON Schema.
 const consultInputShape = {
     preset: z
@@ -65,9 +65,9 @@ const consultInputShape = {
         .optional()
         .describe('Browser-only: bundle upload format when browserBundleFiles is true or auto-bundling is needed. Defaults to "text"; "zip" preserves individual file names in one uploaded archive.'),
     browserThinkingTime: z
-        .enum(["light", "standard", "extended", "heavy"])
+        .enum(["light", "standard", "extended", "heavy", "pro"])
         .optional()
-        .describe("Browser-only: set ChatGPT thinking time when supported by the chosen model."),
+        .describe("Browser-only: set ChatGPT thinking effort when supported by the chosen model. GPT-5.6 supports pro."),
     browserModelStrategy: z
         .enum(["select", "current", "ignore"])
         .optional()
@@ -216,7 +216,9 @@ export function buildConsultBrowserConfig({ userConfig, env, runModel, inputMode
         manualLoginProfileDir: manualLogin
             ? ((envProfileDir || configuredBrowser.manualLoginProfileDir) ?? null)
             : null,
-        thinkingTime: browserThinkingTime ?? configuredBrowser.thinkingTime,
+        thinkingTime: browserThinkingTime ??
+            defaultBrowserThinkingTimeForModel(inputModel ?? runModel) ??
+            configuredBrowser.thinkingTime,
         modelStrategy: browserModelStrategy ?? configuredBrowser.modelStrategy,
         researchMode: browserResearchMode ?? configuredBrowser.researchMode,
         archiveConversations: browserArchive ?? configuredBrowser.archiveConversations,

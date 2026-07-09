@@ -1,6 +1,6 @@
 ---
 name: oracle
-description: "Oracle second-model review using a bundled patched @steipete/oracle browser CLI. Use when Codex needs to ask another model for code review, debugging, refactor advice, design checks, or large file-context analysis, especially with ChatGPT browser mode and uploaded attachments that must submit via Enter instead of clicking Send."
+description: "Oracle second-model review using a bundled patched @steipete/oracle CLI. Use when Codex needs another model for code review, debugging, refactor advice, design checks, or large file-context analysis, including GPT-5.6 Sol/Terra/Luna in ChatGPT browser mode or the Responses API."
 ---
 
 # Oracle Patched
@@ -10,16 +10,23 @@ Use this skill for Oracle second-model review with the bundled patched CLI in th
 Always invoke Oracle through the wrapper script relative to this `SKILL.md`:
 
 ```powershell
-node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.5-pro -p "<task>" --file "src/**"
+node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro -p "<task>" --file "src/**"
 ```
 
 On non-Windows shells, use the same script with forward slashes:
 
 ```bash
-node "<skill-folder>/scripts/run-oracle.mjs" --engine browser --model gpt-5.5-pro -p "<task>" --file "src/**"
+node "<skill-folder>/scripts/run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro -p "<task>" --file "src/**"
 ```
 
 Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patched `oracle-patched/dist/bin/oracle-cli.js` bundled with this repo and installs runtime dependencies on first use if needed.
+
+## GPT-5.6 Model Selection
+
+- Browser: `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` select their matching visible ChatGPT tiers when the account exposes them.
+- Browser: `gpt-5.6-<tier>-pro` selects the tier and then the separate ChatGPT `Pro` reasoning level. For example, `gpt-5.6-sol-pro` means **GPT-5.6 Sol + Pro effort**, not a nonexistent `GPT-5.6 Sol Pro` model slug.
+- API: the same `*-pro` aliases dispatch the matching API model with `reasoning: { effort: "xhigh", mode: "pro" }`; the actual model IDs remain `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`.
+- Do not silently fall back to GPT-5.5 if a requested GPT-5.6 tier is not visible. Use the picker error's available-options list to choose an exposed tier or ask the user.
 
 ## What Is Patched
 
@@ -27,6 +34,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Attachment submissions skip the duplicate pre-send "clickable send button" readiness check after upload completion.
 - Commit verification accepts uploaded-attachment submissions when the composer clears and ChatGPT moves into conversation or response state.
 - Model selection accepts current ChatGPT labels such as `Instant`, `Thinking Heavy`, and `Thinking Extended` for GPT-5.2 browser runs.
+- Model selection supports GPT-5.6 Sol, Terra, and Luna, and maps `gpt-5.6-<tier>-pro` to the tier plus ChatGPT's separate `Pro` reasoning level.
 - Browser duplicate-run guard blocks a new browser submission only after a recent session or live recovery check confirms a currently readable ChatGPT tab is still generating.
 - Browser duplicate-run guard ignores stale live-state and log evidence for sessions already marked `completed`, `error`, or `cancelled`.
 - ChatGPT browser capture targets the latest assistant turn after the latest user prompt and waits for real completion controls before saving a transcript.
@@ -57,10 +65,13 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
   - `node "<skill-folder>\\scripts\\run-oracle.mjs" --dry-run summary -p "<task>" --file "src/**"`
 
 - Browser run:
-  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.5-pro -p "<task>" --file "src/**"`
+  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro -p "<task>" --file "src/**"`
+
+- GPT-5.6 API run (requires API access):
+  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine api --model gpt-5.6-sol-pro -p "<task>" --file "src/**"`
 
 - Force real uploaded attachments instead of inline text:
-  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.2-instant --browser-attachments always -p "<task>" --file "path/to/file.txt"`
+  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro --browser-attachments always -p "<task>" --file "path/to/file.txt"`
 
 - Reattach:
   - `node "<skill-folder>\\scripts\\run-oracle.mjs" session <id> --render`
@@ -90,4 +101,5 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Prefer the live-tab recovery script over launching another Oracle run when the user can see Chrome still generating. Starting another run can duplicate requests and confuse which answer should be used.
 - The wrapper refuses new browser runs only when a recent live state/session log can be verified against an open local Chrome debugging port and a currently readable ChatGPT conversation that is still generating. Terminal, stale, unrelated, or unreadable sessions are not treated as active just because an older recovery read once saw `generating=true`. Override only for an intentional duplicate by setting `ORACLE_ALLOW_BROWSER_DUPLICATE=1`.
 - Treat Oracle output as advisory and verify against the repo and tests.
+- When a GPT-5.6 `*-pro` browser run fails at the effort-selection step, do not submit at a lower effort; inspect the model picker and report the missing `Pro` level.
 - If a session remains `running` but `runtime.promptSubmitted=false`, the URL is still `https://chatgpt.com/`, and live recovery shows `generating=false`, do not treat it as a valid in-progress answer. Use `submit-live-chatgpt.mjs --session <id>` to submit the existing composer, or let the wrapper reconcile it as `not-submitted` once the controller process is gone.

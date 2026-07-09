@@ -1,7 +1,7 @@
 {
   "name": "@steipete/oracle",
   "version": "0.12.1",
-  "description": "CLI wrapper around OpenAI Responses API with GPT-5.5 Pro, GPT-5.5, GPT-5.4, GPT-5.2, GPT-5.1, and GPT-5.1 Codex high reasoning modes.",
+  "description": "CLI wrapper around the OpenAI Responses API with GPT-5.6 Sol, Terra, Luna, Pro mode aliases, and earlier GPT-5 models.",
   "keywords": [],
   "homepage": "https://github.com/steipete/oracle#readme",
   "bugs": {
@@ -44,6 +44,7 @@
     "lint": "pnpm run typecheck && oxlint",
     "lint:fix": "oxlint --fix && pnpm run format",
     "test": "vitest run",
+    "test:gpt-5.6": "node --test tests/gpt-5.6-support.test.mjs",
     "test:mcp": "pnpm run build && pnpm run test:mcp:unit && pnpm run test:mcp:mcporter",
     "test:mcp:unit": "vitest run tests/mcp*.test.ts tests/mcp/**/*.test.ts",
     "test:mcp:mcporter": "CHROME_DEVTOOLS_URL=http://127.0.0.1:0 pnpm dlx mcporter list oracle-local --schema --config config/mcporter.json && CHROME_DEVTOOLS_URL=http://127.0.0.1:0 pnpm dlx mcporter call oracle-local.sessions limit:1 --config config/mcporter.json",

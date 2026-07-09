@@ -11,11 +11,13 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
 </p>
 
-Oracle bundles your prompt and files so another AI can answer with real context. It speaks GPT-5.5 Pro (default), GPT-5.5, GPT-5.4 Pro, GPT-5.4, GPT-5.1 Pro, GPT-5.1 Codex (API-only), GPT-5.1, GPT-5.2, Gemini 3.1 Pro (API-only), Gemini 3 Pro, Claude Sonnet 4.6, Claude Opus 4.1, and more—and it can ask one or multiple models in a single run. Browser automation is available; use `--browser-model-strategy current` to keep the active ChatGPT model (or `ignore` to skip the picker). API remains the most reliable path, and `--copy` is an easy manual fallback.
+Oracle bundles your prompt and files so another AI can answer with real context. It speaks GPT-5.6 Sol, Terra, and Luna (including `*-pro` convenience aliases), GPT-5.5 Pro (default), GPT-5.5, GPT-5.4 Pro, GPT-5.4, GPT-5.1 Pro, GPT-5.1 Codex (API-only), GPT-5.1, GPT-5.2, Gemini 3.1 Pro (API-only), Gemini 3 Pro, Claude Sonnet 4.6, Claude Opus 4.1, and more—and it can ask one or multiple models in a single run. Browser automation is available; use `--browser-model-strategy current` to keep the active ChatGPT model (or `ignore` to skip the picker). API remains the most reliable path, and `--copy` is an easy manual fallback.
 
 ## Setting up (macOS Browser Mode)
 
 Browser mode lets you use GPT-5.5 Pro without any API keys — it automates your Chrome browser directly.
+
+When your ChatGPT account exposes GPT-5.6, use `--model gpt-5.6-sol` (or `gpt-5.6-sol-pro` to set the separate `Pro` reasoning effort). The browser picker may expose only the tiers enabled for your account; Oracle reports the visible options instead of substituting another model.
 
 ### First-time login
 
@@ -59,6 +61,15 @@ npx -y @steipete/oracle --render --copy -p "Review the TS data layer for schema 
 
 # Minimal API run (expects OPENAI_API_KEY in your env)
 npx -y @steipete/oracle -p "Write a concise architecture note for the storage adapters" --file src/storage/README.md
+
+# GPT-5.6 Sol at the ChatGPT Pro reasoning level. Browser mode selects the
+# visible GPT-5.6 Sol tier, then separately sets its Pro reasoning effort.
+npx -y @steipete/oracle --engine browser --model gpt-5.6-sol-pro \
+  -p "Review this migration plan" --file docs/migration.md
+
+# The same alias in API mode sends gpt-5.6-sol with reasoning.mode="pro".
+npx -y @steipete/oracle --engine api --model gpt-5.6-sol-pro \
+  -p "Review this migration plan" --file docs/migration.md
 
 # Multi-model API run
 npx -y @steipete/oracle -p "Cross-check the data layer assumptions" --models gpt-5.1-pro,gemini-3-pro --file "src/**/*.ts"
@@ -277,7 +288,7 @@ Browser automation can open or control Chrome, so dry-runs and live runs print a
 | `-p, --prompt <text>`                                           | Required prompt.                                                                                                                                                                                                                                                                                                                          |
 | `-f, --file <paths...>`                                         | Attach files/dirs (globs + `!` excludes).                                                                                                                                                                                                                                                                                                 |
 | `-e, --engine <api\|browser>`                                   | Choose API or browser (browser is experimental).                                                                                                                                                                                                                                                                                          |
-| `-m, --model <name>`                                            | Built-ins (`gpt-5.5-pro` default, `gpt-5.5`, `gpt-5.4-pro`, `gpt-5.4`, `gpt-5.1-pro`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.1-codex`, `gpt-5.2`, `gpt-5.2-instant`, `gpt-5.2-pro`, `gemini-3.1-pro` API-only, `gemini-3-pro`, `claude-4.6-sonnet`, `claude-4.1-opus`) plus any OpenRouter id (e.g., `minimax/minimax-m2`, `openai/gpt-4o-mini`). |
+| `-m, --model <name>`                                            | Built-ins (`gpt-5.5-pro` default, `gpt-5.6`/`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and matching `*-pro` aliases; `gpt-5.5`, `gpt-5.4-pro`, `gpt-5.4`, `gpt-5.1-pro`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.1-codex`, `gpt-5.2`, `gpt-5.2-instant`, `gpt-5.2-pro`, `gemini-3.1-pro` API-only, `gemini-3-pro`, `claude-4.6-sonnet`, `claude-4.1-opus`) plus any OpenRouter id (e.g., `minimax/minimax-m2`, `openai/gpt-4o-mini`). |
 | `--models <list>`                                               | Comma-separated API models (mix built-ins and OpenRouter ids) for multi-model runs.                                                                                                                                                                                                                                                       |
 | `--followup <sessionId\|responseId>`                            | Continue an OpenAI/Azure Responses API run from a stored oracle session or `resp_...` response id.                                                                                                                                                                                                                                        |
 | `--followup-model <model>`                                      | For multi-model OpenAI/Azure parent sessions, choose which model response to continue from.                                                                                                                                                                                                                                               |
@@ -287,7 +298,7 @@ Browser automation can open or control Chrome, so dry-runs and live runs print a
 | `--browser-manual-login`                                        | Skip cookie copy; reuse a persistent automation profile and wait for manual ChatGPT login.                                                                                                                                                                                                                                                |
 | `--browser-attach-running`                                      | Reuse your current local browser session through local `DevToolsActivePort` discovery; Oracle opens a dedicated tab instead of launching Chrome (defaults to `127.0.0.1:9222`, or combine with `--remote-chrome <host:port>` to hint a different local endpoint).                                                                         |
 | `--browser-tab <ref>`                                           | Reuse an existing ChatGPT tab by `current`, target id, URL, or title substring instead of opening a new tab.                                                                                                                                                                                                                              |
-| `--browser-thinking-time <light\|standard\|extended\|heavy>`    | Set ChatGPT thinking-time intensity (browser; Thinking/Pro models only).                                                                                                                                                                                                                                                                  |
+| `--browser-thinking-time <light\|standard\|extended\|heavy\|pro>` | Set ChatGPT reasoning effort; `pro` is supported for GPT-5.6 tiers.                                                                                                                                                                                                                                                                        |
 | `--browser-research deep`                                       | Activate ChatGPT Deep Research for broad web research and cited reports (browser only).                                                                                                                                                                                                                                                   |
 | `--browser-follow-up <prompt>`                                  | Browser-only multi-turn consult: submit an additional prompt in the same ChatGPT conversation after the initial answer. Repeat for challenge/revision/final-decision passes. Not supported with Deep Research mode.                                                                                                                       |
 | `--browser-archive <auto\|always\|never>`                       | Archive completed ChatGPT browser conversations after local artifacts are saved. `auto` archives successful one-shot chats only, and skips project, Deep Research, multi-turn, failed, and incomplete sessions.                                                                                                                           |

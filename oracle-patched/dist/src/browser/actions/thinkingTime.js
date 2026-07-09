@@ -9,13 +9,13 @@ import { buildClickDispatcher } from "./domEvents.js";
  * or the language pack uses tokens we don't yet match), we log a debug dump
  * and continue with whatever effort the UI defaults to.
  *
- * @param level - The thinking time intensity: 'light', 'standard', 'extended', or 'heavy'
+ * @param level - The thinking effort: 'light', 'standard', 'extended', 'heavy', or 'pro'
  */
 export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
     const result = await evaluateThinkingTimeSelection(Runtime, level, desiredModel);
     const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
     const targetModelKind = inferThinkingTargetModelKind(desiredModel);
-    const strictProEffort = targetModelKind === "pro" && level === "extended";
+    const strictProEffort = level === "pro" || (targetModelKind === "pro" && level === "extended");
     switch (result?.status) {
         case "already-selected":
             logger(`Thinking time: ${result.label ?? capitalizedLevel} (already selected)`);
@@ -53,7 +53,7 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
 /**
  * Best-effort selection of a thinking time level in ChatGPT's composer pill menu.
  * Safe by default: if the pill/menu/option isn't present, we continue without throwing.
- * @param level - The thinking time intensity: 'light', 'standard', 'extended', or 'heavy'
+ * @param level - The thinking effort: 'light', 'standard', 'extended', 'heavy', or 'pro'
  */
 export async function ensureThinkingTimeIfAvailable(Runtime, level, logger, desiredModel) {
     try {
@@ -119,6 +119,7 @@ function buildThinkingTimeExpression(level, desiredModel) {
       standard: ['standard', '标准'],
       extended: ['extended', '扩展', '深度', '加强'],
       heavy: ['heavy', '重度', '加重', '高'],
+      pro: ['pro'],
     };
     const targetTokens = LEVEL_TOKENS[TARGET_LEVEL] || [TARGET_LEVEL];
 
@@ -323,6 +324,25 @@ function buildThinkingTimeExpression(level, desiredModel) {
     if (modelBtn.getAttribute('aria-expanded') !== 'true') {
       dispatchClickSequence(modelBtn);
       await sleep(INITIAL_WAIT_MS);
+    }
+
+    // GPT-5.6's simplified picker can expose effort levels (Medium/High/Extra High/Pro)
+    // as direct menu actions rather than a trailing submenu. Prefer an exact visible
+    // direct action when it does not advertise a nested menu.
+    const directEffortOption = findTrailingButtons().find((node) =>
+      hasStableBox(node) &&
+      node.getAttribute('aria-haspopup') !== 'menu' &&
+      matchesLevel(rowTextForTrailing(node))
+    );
+    if (directEffortOption) {
+      const row = rowForTrailing(directEffortOption) || findEffortRow(directEffortOption);
+      const already = optionIsSelected(directEffortOption) || rowIsSelected(row);
+      const label = directEffortOption.textContent?.trim?.() || row?.textContent?.trim?.() || null;
+      dispatchClickSequence(directEffortOption);
+      await sleep(STEP_WAIT_MS);
+      closeOpenMenus();
+      const confirmed = optionIsSelected(directEffortOption) || rowIsSelected(row);
+      return { status: confirmed ? (already ? 'already-selected' : 'switched') : 'selection-unverified', label };
     }
 
     let trailing = null;

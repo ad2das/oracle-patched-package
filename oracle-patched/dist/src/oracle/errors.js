@@ -95,12 +95,16 @@ export function toTransportError(error, model) {
         const apiMessage = apiError.error?.message ||
             apiError.message ||
             (apiError.status ? `${apiError.status} OpenAI API error` : "OpenAI API error");
+        const modelUnavailable = code === "model_not_found" ||
+            messageText.includes("does not exist") ||
+            messageText.includes("unknown model") ||
+            messageText.includes("model_not_found");
+        if (model.startsWith("gpt-5.6") && modelUnavailable) {
+            return new OracleTransportError("model-unavailable", `${model} is not available for this API organization. GPT-5.6 API preview access must be explicitly provisioned; confirm the approved organization or use gpt-5.5. Browser mode can use GPT-5.6 when the tier is visible in the signed-in ChatGPT account.`, apiError);
+        }
         // Friendly guidance when a pro-tier model isn't available on this base URL / API key.
         if ((model === "gpt-5.5-pro" || model === "gpt-5.4-pro") &&
-            (code === "model_not_found" ||
-                messageText.includes("does not exist") ||
-                messageText.includes("unknown model") ||
-                messageText.includes("model_not_found"))) {
+            modelUnavailable) {
             return new OracleTransportError("model-unavailable", `${model} is not available on this API base/key. Try gpt-5.5, gpt-5-pro, or switch to the browser engine.`, apiError);
         }
         if (apiError.status === 404 || apiError.status === 405) {

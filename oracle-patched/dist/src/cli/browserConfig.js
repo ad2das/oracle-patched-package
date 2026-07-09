@@ -14,6 +14,10 @@ const DEFAULT_CHROME_PROFILE = "Default";
 // The browser label is passed to the model picker which fuzzy-matches against ChatGPT's UI.
 const BROWSER_MODEL_LABELS = [
     // Most specific first (e.g., "gpt-5.2-thinking" before "gpt-5.2")
+    ["gpt-5.6-sol", "GPT-5.6 Sol"],
+    ["gpt-5.6-terra", "GPT-5.6 Terra"],
+    ["gpt-5.6-luna", "GPT-5.6 Luna"],
+    ["gpt-5.6", "GPT-5.6 Sol"],
     ["gpt-5.5-pro", "Pro"],
     ["gpt-5.5", "Thinking 5.5"],
     ["gpt-5.4-pro", "Pro"],
@@ -37,6 +41,13 @@ export function normalizeChatGptModelForBrowser(model) {
     if (normalized === "gpt-5.5-pro" || normalized === "gpt-5.5" || normalized === "gpt-5.4") {
         return normalized;
     }
+    // ChatGPT currently exposes GPT-5.6 tiers directly (for example, "GPT-5.6 Sol")
+    // rather than separate "Sol Pro" model entries. API-only Pro aliases therefore
+    // select the corresponding visible tier in browser mode.
+    const gpt56ProMatch = normalized.match(/^gpt-5\.6-(?:(sol|terra|luna)-)?pro$/);
+    if (gpt56ProMatch) {
+        return `gpt-5.6-${gpt56ProMatch[1] ?? "sol"}`;
+    }
     // Pro variants: resolve to the latest Pro model in ChatGPT.
     if (normalized === "gpt-5-pro" ||
         normalized === "gpt-5.1-pro" ||
@@ -53,6 +64,17 @@ export function normalizeChatGptModelForBrowser(model) {
         return "gpt-5.2";
     }
     return model;
+}
+export function defaultBrowserThinkingTimeForModel(model) {
+    const normalized = (model ?? "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (normalized.includes("5 6") && normalized.split(" ").includes("pro")) {
+        return "pro";
+    }
+    return undefined;
 }
 export async function buildBrowserConfig(options) {
     const desiredModelOverride = options.browserModelLabel?.trim();
@@ -142,7 +164,7 @@ export async function buildBrowserConfig(options) {
         allowCookieErrors: options.browserAllowCookieErrors ?? true,
         remoteChrome,
         browserTabRef: options.browserTab ?? undefined,
-        thinkingTime: options.browserThinkingTime,
+        thinkingTime: options.browserThinkingTime ?? defaultBrowserThinkingTimeForModel(options.model),
         researchMode: options.browserResearch === "deep" ? "deep" : "off",
         archiveConversations: options.browserArchive,
     };

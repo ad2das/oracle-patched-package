@@ -12,7 +12,7 @@ export const consultInputSchema = z
     browserAttachments: z.enum(["auto", "never", "always"]).optional(),
     browserBundleFiles: z.boolean().optional(),
     browserBundleFormat: z.enum(["text", "zip"]).optional(),
-    browserThinkingTime: z.enum(["light", "standard", "extended", "heavy"]).optional(),
+    browserThinkingTime: z.enum(["light", "standard", "extended", "heavy", "pro"]).optional(),
     browserModelStrategy: z.enum(["select", "current", "ignore"]).optional(),
     browserResearchMode: z.enum(["deep"]).optional(),
     browserArchive: z.enum(["auto", "always", "never"]).optional(),

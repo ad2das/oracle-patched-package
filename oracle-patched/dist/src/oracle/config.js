@@ -6,6 +6,9 @@ let countTokensGpt5ProImpl;
 let countTokensAnthropicImpl;
 export const DEFAULT_MODEL = "gpt-5.5-pro";
 export const PRO_MODELS = new Set([
+    "gpt-5.6-sol-pro",
+    "gpt-5.6-terra-pro",
+    "gpt-5.6-luna-pro",
     "gpt-5.5-pro",
     "gpt-5.4-pro",
     "gpt-5.1-pro",
@@ -27,6 +30,87 @@ const countTokensAnthropic = (input) => {
     return countTokensAnthropicImpl(stringifyTokenizerInput(input));
 };
 export const MODEL_CONFIGS = {
+    "gpt-5.6": {
+        model: "gpt-5.6",
+        apiModel: "gpt-5.6-sol",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 5 / 1_000_000,
+            outputPerToken: 30 / 1_000_000,
+        },
+        reasoning: { effort: "medium" },
+    },
+    "gpt-5.6-sol": {
+        model: "gpt-5.6-sol",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 5 / 1_000_000,
+            outputPerToken: 30 / 1_000_000,
+        },
+        reasoning: { effort: "medium" },
+    },
+    "gpt-5.6-terra": {
+        model: "gpt-5.6-terra",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 2.5 / 1_000_000,
+            outputPerToken: 15 / 1_000_000,
+        },
+        reasoning: { effort: "medium" },
+    },
+    "gpt-5.6-luna": {
+        model: "gpt-5.6-luna",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 1 / 1_000_000,
+            outputPerToken: 6 / 1_000_000,
+        },
+        reasoning: { effort: "medium" },
+    },
+    "gpt-5.6-sol-pro": {
+        model: "gpt-5.6-sol-pro",
+        apiModel: "gpt-5.6-sol",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 5 / 1_000_000,
+            outputPerToken: 30 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh", mode: "pro" },
+    },
+    "gpt-5.6-terra-pro": {
+        model: "gpt-5.6-terra-pro",
+        apiModel: "gpt-5.6-terra",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 2.5 / 1_000_000,
+            outputPerToken: 15 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh", mode: "pro" },
+    },
+    "gpt-5.6-luna-pro": {
+        model: "gpt-5.6-luna-pro",
+        apiModel: "gpt-5.6-luna",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 1_050_000,
+        pricing: {
+            inputPerToken: 1 / 1_000_000,
+            outputPerToken: 6 / 1_000_000,
+        },
+        reasoning: { effort: "xhigh", mode: "pro" },
+    },
     "gpt-5.5-pro": {
         model: "gpt-5.5-pro",
         provider: "openai",
