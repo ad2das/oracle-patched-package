@@ -10,6 +10,7 @@ import {
     assertResolvedModelSelectionForTest,
     buildComposerSignalMatchersForTest,
     buildModelMatchersLiteralForTest,
+    buildModelSelectionExpressionForTest,
 } from "../dist/src/browser/actions/modelSelection.js";
 import { buildThinkingTimeExpressionForTest } from "../dist/src/browser/actions/thinkingTime.js";
 
@@ -133,5 +134,10 @@ describe("GPT-5.6 CLI aliases", () => {
         const expression = buildThinkingTimeExpressionForTest("pro", "GPT-5.6 Sol");
         assert.match(expression, /pro: \['pro'\]/);
         assert.match(expression, /directEffortOption/);
+        assert.match(expression, /role=\\"menuitemradio\\"/);
+
+        const modelExpression = buildModelSelectionExpressionForTest("GPT-5.6 Sol");
+        assert.match(modelExpression, /checkedGpt56ModelLabel/);
+        assert.match(modelExpression, /data-has-submenu/);
     });
 });

@@ -333,7 +333,14 @@ function buildThinkingTimeExpression(level, desiredModel) {
       hasStableBox(node) &&
       node.getAttribute('aria-haspopup') !== 'menu' &&
       matchesLevel(rowTextForTrailing(node))
-    );
+    ) || Array.from(document.querySelectorAll('[role="menuitemradio"]')).find((node) => {
+      if (!hasStableBox(node)) return false;
+      const text = normalize(node.textContent ?? '');
+      // GPT-5.6 exposes Medium/High/Extra High/Pro as ordinary radio rows in
+      // the Intelligence picker, without the older trailing-action attribute.
+      // Exclude model rows that happen to contain a level token in their name.
+      return !text.includes('gpt') && matchesLevel(text);
+    });
     if (directEffortOption) {
       const row = rowForTrailing(directEffortOption) || findEffortRow(directEffortOption);
       const already = optionIsSelected(directEffortOption) || rowIsSelected(row);

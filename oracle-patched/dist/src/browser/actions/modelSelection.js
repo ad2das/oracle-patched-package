@@ -243,6 +243,35 @@ function buildModelSelectionExpression(targetModel, strategy) {
     const getComposerModelLabel = () =>
       (document.querySelector(COMPOSER_MODEL_SIGNAL_SELECTOR)?.textContent ?? '').trim();
     const readComposerModelSignal = () => normalizeText(getComposerModelLabel());
+    // GPT-5.6's current picker is a two-level Radix menu. The visible trigger
+    // is the separate Intelligence/effort pill (often labelled "Pro"), while
+    // the selected model is exposed only as a checked menuitemradio inside the
+    // opened model submenu. Treat that checked model row as authoritative when
+    // the target is a GPT-5.6 tier so we do not mistake the effort pill for the
+    // model or keep reopening the menu forever.
+    const checkedGpt56ModelLabel = () => {
+      if (desiredVersion !== '5-6') return '';
+      const candidates = Array.from(document.querySelectorAll('[role="menuitemradio"]'));
+      const selected = candidates.find((node) => {
+        const ariaChecked = node.getAttribute('aria-checked');
+        const ariaSelected = node.getAttribute('aria-selected');
+        const dataState = (node.getAttribute('data-state') ?? '').toLowerCase();
+        if (ariaChecked !== 'true' && ariaSelected !== 'true' && dataState !== 'checked' && dataState !== 'selected' && dataState !== 'on') {
+          return false;
+        }
+        const label = normalizeText(node.textContent ?? '');
+        return label.includes('5 6') || label.includes('gpt56');
+      });
+      return selected ? (selected.textContent ?? '').trim() : '';
+    };
+    const checkedGpt56ModelMatchesTarget = () => {
+      const label = normalizeText(checkedGpt56ModelLabel());
+      if (!label) return false;
+      if (desiredGpt56Tier && !label.includes(desiredGpt56Tier)) return false;
+      if (wantsPro && !labelHasProWord(label)) return false;
+      if (!wantsPro && labelHasProWord(label)) return false;
+      return true;
+    };
     const withProPillSignal = (label) => {
       const resolved = label || '';
       if (!wantsPro || !hasProComposerPill()) return resolved;
@@ -252,8 +281,15 @@ function buildModelSelectionExpression(targetModel, strategy) {
       if (normalized.includes('pro')) return resolved;
       return resolved + ' + Pro';
     };
-    const getResolvedLabel = (fallback) =>
-      withProPillSignal(getComposerModelLabel() || getButtonLabel() || fallback);
+    const getResolvedLabel = (fallback) => {
+      const checkedModel = checkedGpt56ModelLabel();
+      // The GPT-5.6 trigger text is the effort level (for example, "Pro"),
+      // not the model. Never report that effort label as the resolved model.
+      if (desiredVersion === '5-6') {
+        return checkedModel || fallback;
+      }
+      return withProPillSignal(checkedModel || getComposerModelLabel() || getButtonLabel() || fallback);
+    };
     if (MODEL_STRATEGY === 'current') {
       const currentLabel = getResolvedLabel(PRIMARY_LABEL);
       return {
@@ -316,6 +352,9 @@ function buildModelSelectionExpression(targetModel, strategy) {
       return COMPOSER_SIGNAL_INCLUDES.some((token) => token && signal.includes(token));
     };
     const activeSelectionMatchesTarget = () => {
+      if (checkedGpt56ModelMatchesTarget()) {
+        return true;
+      }
       if (buttonMatchesTarget()) {
         return true;
       }
@@ -535,6 +574,7 @@ function buildModelSelectionExpression(targetModel, strategy) {
     const findBestOption = () => {
       // Walk through every menu item and keep whichever earns the highest score.
       let bestMatch = null;
+      let bestSubmenuMatch = null;
       const menus = Array.from(document.querySelectorAll(${menuContainerLiteral}));
       for (const menu of menus) {
         const buttons = Array.from(menu.querySelectorAll(${menuItemLiteral}));
@@ -551,11 +591,21 @@ function buildModelSelectionExpression(targetModel, strategy) {
           }
           const label = getOptionLabel(option);
           if (!bestMatch || score > bestMatch.score) {
-            bestMatch = { node: option, label, score, testid, normalizedText };
+            const isSubmenu = option.getAttribute('aria-haspopup') === 'menu' ||
+              option.hasAttribute('data-has-submenu');
+            const candidate = { node: option, label, score, testid, normalizedText };
+            if (isSubmenu) {
+              if (!bestSubmenuMatch || score > bestSubmenuMatch.score) {
+                bestSubmenuMatch = candidate;
+              }
+            }
+            else {
+              bestMatch = candidate;
+            }
           }
         }
       }
-      return bestMatch;
+      return bestMatch || bestSubmenuMatch;
     };
     const waitForTargetSelection = (previousButtonLabel, previousComposerSignal) => new Promise((resolve) => {
       const waitStart = performance.now();
@@ -630,7 +680,9 @@ function buildModelSelectionExpression(targetModel, strategy) {
           dispatchClickSequence(match.node);
           // Submenus (e.g. "Legacy models") need a second pass to pick the actual model option.
           // Keep scanning once the submenu opens instead of treating the submenu click as a final switch.
-          const isSubmenu = (match.testid ?? '').toLowerCase().includes('submenu');
+          const isSubmenu = (match.testid ?? '').toLowerCase().includes('submenu') ||
+            match.node.getAttribute('aria-haspopup') === 'menu' ||
+            match.node.hasAttribute('data-has-submenu');
           if (isSubmenu) {
             setTimeout(attempt, REOPEN_INTERVAL_MS / 2);
             return;
