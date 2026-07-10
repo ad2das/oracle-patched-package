@@ -549,7 +549,7 @@ program
     .option("--model <name>", "Filter sessions/output for a specific model.", "")
     .option("--path", "Print the stored session paths instead of attaching.", false)
     .option("--harvest", "Re-read the bound browser tab and print/save the latest assistant output.", false)
-    .option("--live", "Tail the live browser tab for this session until it completes, stalls, or detaches.", false)
+    .option("--live", "Tail the live browser tab for this session until it completes or detaches.", false)
     .option("--write-output <path>", "Write harvested browser output to this file (requires --harvest or --live).")
     .option("--browser-tab <ref>", "Override the browser tab ref used for harvesting/live tail (current, target id, URL, or title substring).")
     .addOption(new Option("--clean", "Deprecated alias for --clear.").default(false).hideHelp())

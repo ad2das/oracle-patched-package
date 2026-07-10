@@ -5,7 +5,6 @@ import { sessionStore } from "../sessionStore.js";
 import { collectChatGptTabs, DEFAULT_REMOTE_CHROME_HOST, DEFAULT_REMOTE_CHROME_PORT, extractConversationIdFromUrl, formatBrowserTabState, harvestChatGptTab, sessionMatchesTab, } from "../browser/liveTabs.js";
 import { resolveOutputPath } from "./writeOutputPath.js";
 const LIVE_POLL_MS = 2000;
-const DEFAULT_STALL_THRESHOLD_MS = 60_000;
 function sessionBrowserEndpoint(meta) {
     const runtime = meta?.browser?.runtime ?? {};
     const remote = meta?.browser?.config?.remoteChrome ?? {};
@@ -180,9 +179,7 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
         port: DEFAULT_REMOTE_CHROME_PORT,
     };
     const browserTabRef = options.browserTabRef ?? resolveSessionTabRef(meta);
-    const stallThresholdMs = options.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     let lastHash = null;
-    let unchangedSince = Date.now();
     while (true) {
         const harvested = await harvestChatGptTab({
             host: endpoint.host,
@@ -193,21 +190,14 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
         const hash = createHash("sha1").update(fullText).digest("hex");
         if (hash !== lastHash) {
             lastHash = hash;
-            unchangedSince = Date.now();
             const statusLine = `[${new Date().toISOString()}] state=${harvested.state} stop=${harvested.stopExists ? "yes" : "no"} ` +
                 `send=${harvested.sendExists ? "yes" : "no"} model=${harvested.currentModelLabel || "(unknown)"} ` +
                 `snippet=${snippet(harvested.lastAssistantSnippet || fullText, 160)}`;
             console.log(statusLine);
             await persistHarvest(sessionId, meta, harvested);
         }
-        const derivedState = harvested.stopExists
-            ? Date.now() - unchangedSince >= stallThresholdMs
-                ? "stalled"
-                : "running"
-            : harvested.authenticated
-                ? "completed"
-                : "detached";
-        if (derivedState === "completed" || derivedState === "stalled" || derivedState === "detached") {
+        const derivedState = deriveLiveTailState(harvested);
+        if (derivedState === "completed" || derivedState === "detached") {
             const finalHarvest = {
                 ...harvested,
                 state: derivedState,
@@ -225,4 +215,10 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
         }
         await new Promise((resolve) => setTimeout(resolve, LIVE_POLL_MS));
     }
+}
+export function deriveLiveTailState(harvested) {
+    if (harvested?.stopExists) {
+        return "running";
+    }
+    return harvested?.authenticated ? "completed" : "detached";
 }

@@ -233,6 +233,11 @@ export function classifyTabState(summary) {
     }
     return "detached";
 }
+export function classifyObservedTabState(summary, _previousFingerprint) {
+    // Fingerprint stability is not a liveness signal. In particular, the Pro
+    // placeholder can remain byte-for-byte identical during long reasoning.
+    return classifyTabState(summary);
+}
 export async function collectChatGptTabs(options = {}) {
     const { host, port } = normalizeHostPort(options);
     const targets = await listChatGptTargets({ host, port });
@@ -384,10 +389,11 @@ export async function harvestChatGptTab(options = {}) {
             harvested.lastUserText = followup.lastUserText;
             harvested.lastUserSnippet = followup.lastUserSnippet;
             harvested.fingerprint = followup.fingerprint;
-            harvested.state =
-                harvested.stopExists && firstFingerprint === followup.fingerprint
-                    ? "stalled"
-                    : classifyTabState(harvested);
+            // A visible stop control is authoritative evidence that ChatGPT is
+            // still generating. Pro reasoning can legitimately leave the
+            // assistant placeholder unchanged for many minutes, so text or
+            // fingerprint stability must never override that live signal.
+            harvested.state = classifyObservedTabState(harvested, firstFingerprint);
         }
         else {
             harvested.state = classifyTabState(harvested);
