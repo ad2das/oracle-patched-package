@@ -167,7 +167,11 @@ export async function submitPrompt(deps, prompt, logger) {
         });
     }
     const attachmentNames = deps?.attachmentNames;
-    const clicked = await attemptSendButton(runtime, logger, attachmentNames);
+    // ChatGPT's current attachment composer can leave the visible send button in a
+    // transient state. Enter is the reliable commit path for attachment-bearing turns.
+    const clicked = Array.isArray(attachmentNames) && attachmentNames.length > 0
+        ? false
+        : await attemptSendButton(runtime, logger, attachmentNames);
     if (!clicked) {
         await input.dispatchKeyEvent({
             type: "keyDown",
@@ -184,10 +188,13 @@ export async function submitPrompt(deps, prompt, logger) {
     else {
         logger("Clicked send button");
     }
-    await deps.onPromptSubmitted?.();
     const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
     // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
-    return await verifyPromptCommitted(runtime, prompt, commitTimeoutMs, logger, deps.baselineTurns ?? undefined, attachmentNames);
+    const committedTurns = await verifyPromptCommitted(runtime, prompt, commitTimeoutMs, logger, deps.baselineTurns ?? undefined, attachmentNames);
+    // A reused /c/ tab already has conversation/assistant content. Persist promptSubmitted only
+    // after this run's prompt is proven in a new user turn, never merely after dispatching click/Enter.
+    await deps.onPromptSubmitted?.();
+    return committedTurns;
 }
 export async function clearPromptComposer(Runtime, logger) {
     const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
@@ -561,6 +568,7 @@ async function verifyPromptCommitted(Runtime, prompt, timeoutMs, logger, baselin
         const attachmentCommit = Array.isArray(attachmentNames) &&
             attachmentNames.length > 0 &&
             info?.composerCleared &&
+            Boolean(info?.hasNewTurn) &&
             ((info?.stopVisible ?? false) || info?.assistantVisible || info?.inConversation);
         if (attachmentCommit) {
             return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;

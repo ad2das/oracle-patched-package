@@ -109,6 +109,8 @@ function persistLiveState(output) {
     sessionStatus: sessionMeta?.status ?? output.sessionStatus,
     sessionError: output.sessionError,
     length: output.length,
+    promptMatch: Boolean(output.promptMatch),
+    assistantAfterPrompt: Boolean(output.assistantAfterPrompt),
   };
   writeJsonIfPossible(path.join(oracleHomeDir(), "live-chatgpt-state.json"), state);
   if (output.session) {
@@ -126,17 +128,22 @@ function reviveSessionMetaFromLiveConversation(session, output, state, sessionMe
   if (!session || !sessionMeta) return;
   const liveUrl = output.url || output.tabUrl;
   if (!/chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(liveUrl ?? ""))) return;
-  if (!output.sessionMatch?.matched && !output.promptMatch) return;
+  const runtime = sessionMeta.browser?.runtime ?? {};
+  const sessionErrorText = `${sessionMeta.errorMessage ?? ""} ${sessionMeta.error?.message ?? ""}`;
+  const explicitlyNotSubmitted = sessionMeta.response?.incompleteReason === "not-submitted" ||
+    /Attachments did not finish uploading before timeout|not-submitted/i.test(sessionErrorText);
+  // Target id / tab URL only identify the reused conversation. They do not prove that
+  // this run's follow-up prompt was ever sent. promptSubmitted is written only after
+  // a new-turn commit proof in the normal submitter or live recovery submitter.
+  if (runtime.promptSubmitted !== true || !output.promptMatch || !output.sessionMatch?.matched) return;
 
   const metaPath = path.join(oracleHomeDir(), "sessions", session, "meta.json");
-  const runtime = sessionMeta.browser?.runtime ?? {};
   const shouldRevive =
     sessionMeta.status === "running" ||
     (
       sessionMeta.status === "error" &&
       (
-        sessionMeta.response?.incompleteReason === "not-submitted" ||
-        /Attachments did not finish uploading before timeout|not-submitted/i.test(String(sessionMeta.errorMessage ?? ""))
+        explicitlyNotSubmitted
       )
     );
   if (!shouldRevive) return;
@@ -150,7 +157,7 @@ function reviveSessionMetaFromLiveConversation(session, output, state, sessionMe
     chromePort: output.port ? Number(output.port) || output.port : runtime.chromePort,
     chromeTargetId: output.tabId ?? runtime.chromeTargetId,
   };
-  const completed = !output.generating && Number(output.length ?? 0) > 0;
+  const completed = Boolean(output.promptMatch) && !output.generating && Boolean(output.assistantAfterPrompt);
   const nextStatus = completed ? "completed" : "running";
   const nextResponse = completed
     ? { status: "completed", incompleteReason: "live-conversation-recovered" }
@@ -164,14 +171,14 @@ function reviveSessionMetaFromLiveConversation(session, output, state, sessionMe
     },
     response: nextResponse,
     errorMessage: undefined,
-    completedAt: completed ? now : sessionMeta.completedAt,
+    completedAt: completed ? now : undefined,
     updatedAt: now,
     models: Array.isArray(sessionMeta.models)
       ? sessionMeta.models.map((model) => model.status === "running" || model.status === "pending" || model.response?.incompleteReason === "not-submitted"
         ? {
             ...model,
             status: nextStatus,
-            completedAt: completed ? now : model.completedAt,
+            completedAt: completed ? now : undefined,
             response: nextResponse,
             error: undefined,
           }
@@ -179,6 +186,19 @@ function reviveSessionMetaFromLiveConversation(session, output, state, sessionMe
       : sessionMeta.models,
   };
   writeJsonIfPossible(metaPath, nextMeta);
+  for (const model of nextMeta.models ?? []) {
+    if (!model?.model) continue;
+    const sidecarPath = path.join(oracleHomeDir(), "sessions", session, "models", `${model.model}.json`);
+    const sidecar = readJson(sidecarPath);
+    if (!sidecar) continue;
+    writeJsonIfPossible(sidecarPath, {
+      ...sidecar,
+      status: model.status,
+      completedAt: model.completedAt,
+      response: model.response,
+      error: model.error,
+    });
+  }
 }
 
 function clearLiveStateAfterFailedRead(attempts) {
@@ -239,7 +259,17 @@ function clearLiveStateAfterFailedRead(attempts) {
 }
 
 function readSessionRuntime(id) {
-  return readSessionMeta(id)?.browser?.runtime ?? null;
+  const meta = readSessionMeta(id);
+  const runtime = meta?.browser?.runtime ?? {};
+  const config = meta?.browser?.config ?? meta?.options?.browserConfig ?? {};
+  const remoteChrome = config.remoteChrome ?? {};
+  const enriched = {
+    ...runtime,
+    chromePort: runtime.chromePort ?? remoteChrome.port,
+    chromeHost: runtime.chromeHost ?? remoteChrome.host,
+    tabUrl: runtime.tabUrl ?? config.browserTabRef,
+  };
+  return Object.values(enriched).some((value) => value != null && value !== "") ? enriched : null;
 }
 
 function normalizeText(value) {
@@ -354,7 +384,6 @@ function buildDomProbeExpression(tail, needles = []) {
   const encodedNeedles = JSON.stringify(needles);
   return `(() => {
         const text = document.body.innerText || "";
-        const normalizedText = text.replace(/\\s+/g, ' ').trim();
         const promptNeedles = ${encodedNeedles};
         const labels = [...document.querySelectorAll('button,[role="button"]')]
           .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
@@ -371,17 +400,40 @@ function buildDomProbeExpression(tail, needles = []) {
         const userMessages = [...document.querySelectorAll('[data-message-author-role="user"]')]
           .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
-        const lastAssistantMessage = assistantMessages.at(-1) || "";
+        const roleTurns = [...document.querySelectorAll('[data-message-author-role]')]
+          .map((node) => ({
+            role: node.getAttribute('data-message-author-role') || '',
+            text: (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim(),
+          }))
+          .filter((turn) => turn.text);
+        let matchingUserTurn = -1;
+        for (let index = roleTurns.length - 1; index >= 0; index -= 1) {
+          const turn = roleTurns[index];
+          if (turn.role === 'user' && promptNeedles.some((needle) => turn.text.includes(needle))) {
+            matchingUserTurn = index;
+            break;
+          }
+        }
+        const assistantsAfterPrompt = matchingUserTurn >= 0
+          ? roleTurns.slice(matchingUserTurn + 1).filter((turn) => turn.role === 'assistant' && turn.text)
+          : [];
+        const assistantAfterPrompt = assistantsAfterPrompt.at(-1)?.text || "";
+        const lastAssistantMessage = promptNeedles.length > 0
+          ? assistantAfterPrompt
+          : (assistantMessages.at(-1) || "");
         return {
           title: document.title,
           url: location.href,
           length: text.length,
-          promptMatch: promptNeedles.some((needle) => normalizedText.includes(needle)),
+          // Match only committed user turns. The active composer is part of body.innerText
+          // and must never revive a typed-but-unsent follow-up as submitted.
+          promptMatch: promptNeedles.some((needle) => userMessages.some((message) => message.includes(needle))),
           generating: stopExists || thinkingText,
           stopExists,
           articleCount: articles.length,
           assistantCount: assistantMessages.length,
           userCount: userMessages.length,
+          assistantAfterPrompt: Boolean(assistantAfterPrompt),
           conversationLoaded: articles.length > 0 || assistantMessages.length > 0 || userMessages.length > 0,
           lastAssistantMessage: lastAssistantMessage.slice(-${Math.max(1000, tail)}),
           lastArticle: (articles.at(-1) || '').slice(-${Math.max(1000, tail)}),
@@ -396,7 +448,7 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
   const valueUrl = String(value?.url ?? "");
   const urls = `${targetUrl}\n${valueUrl}`;
   const liveConversationUrl = /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(`${targetUrl}\n${valueUrl}`);
-  const hasSubmittedRuntime = Boolean(runtime?.promptSubmitted || runtime?.conversationId || runtime?.tabUrl);
+  const hasSubmittedRuntime = runtime?.promptSubmitted === true;
   const expectedConversationId = runtime?.conversationId;
   const actualConversationId = conversationIdFromUrl(valueUrl) || conversationIdFromUrl(targetUrl);
   if (expectedConversationId && actualConversationId && expectedConversationId !== actualConversationId) {
@@ -497,7 +549,7 @@ async function readTarget({ target, port, sessionMeta, sessionRuntime, needles, 
 async function main() {
   const ports = discoverPorts();
   const sessionMeta = readSessionMeta(sessionId);
-  const sessionRuntime = sessionMeta?.browser?.runtime ?? null;
+  const sessionRuntime = readSessionRuntime(sessionId);
   const sessionTabUrl = sessionRuntime?.tabUrl;
   const needles = promptNeedles(sessionMeta);
   const attempts = [];

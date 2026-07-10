@@ -30,9 +30,13 @@ const sessionDir = path.join(oracleHome, "sessions", sessionId);
 const metaPath = path.join(sessionDir, "meta.json");
 const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
 const runtime = meta.browser?.runtime ?? {};
+const browserConfig = meta.browser?.config ?? meta.options?.browserConfig ?? {};
 const preparedSubmission = meta.browser?.preparedSubmission ?? meta.options?.preparedSubmission ?? {};
 const prompt = preparedSubmission.prompt || meta.options?.prompt || "";
-const port = runtime.chromePort;
+const remoteChrome = browserConfig.remoteChrome ?? {};
+const port = runtime.chromePort ?? remoteChrome.port;
+const host = runtime.chromeHost ?? remoteChrome.host ?? "127.0.0.1";
+const configuredTabRef = runtime.tabUrl ?? browserConfig.browserTabRef;
 
 if (!port || !prompt) {
   console.error(`Session has no Chrome port or prompt to submit. port=${Boolean(port)} prompt=${Boolean(prompt)}`);
@@ -40,7 +44,7 @@ if (!port || !prompt) {
 }
 
 async function listTabs() {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+  const response = await fetch(`http://${host}:${port}/json/list`);
   if (!response.ok) throw new Error(`DevTools list failed: HTTP ${response.status}`);
   return response.json();
 }
@@ -49,6 +53,7 @@ function scoreTab(tab) {
   let score = 0;
   if (runtime.chromeTargetId && tab.id === runtime.chromeTargetId) score += 1000;
   if (tab.url === runtime.tabUrl) score += 500;
+  if (configuredTabRef && tab.url === configuredTabRef) score += 450;
   if (/chatgpt\.com/i.test(tab.url ?? "")) score += 100;
   return score;
 }
@@ -98,10 +103,10 @@ function prepareComposerExpression() {
     };
     const dispatchInput = (node) => {
       try {
-        node.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: prompt, inputType: 'insertFromPaste' }));
+        node.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: '', inputType: 'deleteContentBackward' }));
       } catch {}
       try {
-        node.dispatchEvent(new InputEvent('input', { bubbles: true, data: prompt, inputType: 'insertFromPaste' }));
+        node.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteByCut' }));
       } catch {
         node.dispatchEvent(new Event('input', { bubbles: true }));
       }
@@ -150,6 +155,43 @@ function composerTextExpression() {
   })()`;
 }
 
+function attachmentProofExpression(expectedNames) {
+  const names = expectedNames.map((name) => path.basename(String(name ?? ""))).filter(Boolean);
+  return `(() => {
+    const normalize = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const expected = ${JSON.stringify(names)}.map((name) => {
+      const normalized = normalize(name);
+      return { normalized, stem: normalized.replace(/\\.[a-z0-9]{1,10}$/i, '') };
+    });
+    const prompts = Array.from(document.querySelectorAll('#prompt-textarea,textarea,[contenteditable="true"],[role="textbox"]'));
+    const prompt = prompts.find((node) => {
+      const rect = node.getBoundingClientRect?.();
+      return rect && rect.width > 0 && rect.height > 0;
+    }) || prompts[0];
+    const scope = prompt?.closest?.('form')?.parentElement || prompt?.closest?.('form') || document;
+    const tileNames = Array.from(scope.querySelectorAll('[role="group"][class*="file-tile"]'))
+      .map((node) => normalize(
+        (node.getAttribute('aria-label') || '') + ' ' + (node.innerText || node.textContent || '')
+      ))
+      .filter(Boolean);
+    const inputNames = Array.from(scope.querySelectorAll('input[type="file"]')).flatMap((input) =>
+        Array.from(input.files || []).map((file) => file?.name || '')
+      ).map(normalize).filter(Boolean);
+    const matches = (item, value) =>
+      value.includes(item.normalized) || (item.stem.length >= 6 && value.includes(item.stem))
+    ;
+    const missing = expected.filter((item) => !tileNames.some((value) => matches(item, value)));
+    const duplicates = expected.filter((item) => tileNames.filter((value) => matches(item, value)).length > 1);
+    return {
+      ok: missing.length === 0 && duplicates.length === 0,
+      observed: tileNames,
+      inputNames,
+      missing: missing.map((item) => item.normalized),
+      duplicates: duplicates.map((item) => item.normalized),
+    };
+  })()`;
+}
+
 function sendExpression() {
   return `(() => {
     const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
@@ -175,7 +217,8 @@ function sendExpression() {
   })()`;
 }
 
-function probeExpression() {
+function probeExpression(expectedPrompt, baselineUserCount = -1) {
+  const expectedPrefix = String(expectedPrompt ?? "").replace(/\s+/g, " ").trim().slice(0, 120).toLowerCase();
   return `(() => {
     const text = document.body.innerText || '';
     const composerNodes = [
@@ -192,31 +235,40 @@ function probeExpression() {
     const composerText = composer ? ('value' in composer ? composer.value : composer.innerText || composer.textContent || '') : '';
     const buttons = Array.from(document.querySelectorAll('button,[role="button"]'))
       .map((node) => [node.getAttribute('aria-label'), node.textContent].filter(Boolean).join(' '));
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const expectedPrefix = ${JSON.stringify(expectedPrefix)};
+    const userMessages = Array.from(document.querySelectorAll('[data-message-author-role="user"]'))
+      .map((node) => normalize(node.innerText || node.textContent || ''))
+      .filter(Boolean);
+    const promptMatch = expectedPrefix.length > 30 && userMessages.some((value) => value.includes(expectedPrefix));
+    const lastUser = userMessages.at(-1) || '';
+    const newPromptMatch = userMessages.length > ${Number(baselineUserCount)} &&
+      expectedPrefix.length > 30 && lastUser.includes(expectedPrefix);
     return {
       url: location.href,
       title: document.title,
       generating: buttons.some((label) => /stop generating|stop answering|생성 중지|중지/i.test(label)) || /thinking|finalizing answer|응답 생성|생각 중/i.test(text),
       textLength: text.length,
       composerLength: composerText.trim().length,
+      userCount: userMessages.length,
+      promptMatch,
+      newPromptMatch,
     };
   })()`;
 }
 
-function isConversationUrl(value) {
-  return /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)/i.test(String(value ?? ""));
-}
-
 function probeShowsSubmitted(value) {
-  return Boolean(
-    isConversationUrl(value?.url) ||
-    value?.generating ||
-    (Number(value?.composerLength ?? 0) === 0 && Number(value?.textLength ?? 0) > 0)
-  );
+  // The same prompt may already exist in a reused conversation. Only a user-turn
+  // count advance after this recovery attempt proves that this attempt submitted it.
+  return value?.newPromptMatch === true;
 }
 
 const tabs = await listTabs();
-const tab = tabs
-  .filter((item) => item.webSocketDebuggerUrl)
+const controllableTabs = tabs.filter((item) => item.webSocketDebuggerUrl);
+const configuredTab = configuredTabRef
+  ? controllableTabs.find((item) => item.url === configuredTabRef || item.id === configuredTabRef)
+  : null;
+const tab = configuredTabRef ? configuredTab : controllableTabs
   .map((item) => ({ item, score: scoreTab(item) }))
   .sort((a, b) => b.score - a.score)[0]?.item;
 
@@ -226,6 +278,42 @@ if (!tab) {
 }
 
 const result = await withCdp(tab.webSocketDebuggerUrl, async (send) => {
+  const initial = await send("Runtime.evaluate", {
+    expression: probeExpression(prompt, -1),
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  const initialValue = initial.result?.result?.value ?? {};
+  const baselineUserCount = Number(initialValue.userCount ?? 0) || 0;
+  if (runtime.promptSubmitted === true && initialValue.promptMatch) {
+    return {
+      submitted: { submitted: true, method: "existing-prompt-proof", url: initialValue.url },
+      probe: initialValue,
+    };
+  }
+  const expectedAttachments = Array.isArray(preparedSubmission.attachments)
+    ? preparedSubmission.attachments.map((item) => item?.displayPath || item?.path).filter(Boolean)
+    : [];
+  if (expectedAttachments.length > 0) {
+    const attachmentProof = await send("Runtime.evaluate", {
+      expression: attachmentProofExpression(expectedAttachments),
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    const attachmentValue = attachmentProof.result?.result?.value;
+    if (!attachmentValue?.ok) {
+      return {
+        submitted: {
+          submitted: false,
+          reason: "prepared-attachments-missing",
+          missing: attachmentValue?.missing,
+          observed: attachmentValue?.observed,
+          url: initialValue.url,
+        },
+        probe: initialValue,
+      };
+    }
+  }
   const prepared = await send("Runtime.evaluate", {
     expression: prepareComposerExpression(),
     returnByValue: true,
@@ -254,16 +342,31 @@ const result = await withCdp(tab.webSocketDebuggerUrl, async (send) => {
         url: composer.result?.result?.value?.url,
       };
     } else {
-      const clicked = await send("Runtime.evaluate", {
-        expression: sendExpression(),
-        returnByValue: true,
-        awaitPromise: true,
-      });
-      submittedValue = clicked.result?.result?.value;
-      if (!submittedValue?.submitted) {
+      const clicked = expectedAttachments.length > 0
+        ? null
+        : await send("Runtime.evaluate", {
+            expression: sendExpression(),
+            returnByValue: true,
+            awaitPromise: true,
+          });
+      const dispatched = clicked?.result?.result?.value ?? { submitted: false, reason: "attachment-enter-required" };
+      submittedValue = {
+        submitted: false,
+        sendDispatched: Boolean(dispatched?.submitted),
+        method: dispatched?.method,
+        reason: dispatched?.reason ?? "awaiting-current-turn-proof",
+        url: dispatched?.url,
+      };
+      if (!dispatched?.submitted) {
         await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
         await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-        submittedValue = { submitted: true, method: "cdp-enter", url: composer.result?.result?.value?.url };
+        submittedValue = {
+          submitted: false,
+          sendDispatched: true,
+          method: "cdp-enter",
+          reason: "awaiting-current-turn-proof",
+          url: composer.result?.result?.value?.url,
+        };
       }
     }
   }
@@ -271,20 +374,19 @@ const result = await withCdp(tab.webSocketDebuggerUrl, async (send) => {
   for (let attempt = 0; attempt < 15; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     probe = await send("Runtime.evaluate", {
-      expression: probeExpression(),
+      expression: probeExpression(prompt, baselineUserCount),
       returnByValue: true,
       awaitPromise: true,
     });
     const value = probe.result?.result?.value;
     if (probeShowsSubmitted(value)) {
-      if (!submittedValue?.submitted) {
-        submittedValue = {
-          submitted: true,
-          method: "post-submit-probe",
-          reason: submittedValue?.reason,
-          url: value?.url,
-        };
-      }
+      submittedValue = {
+        submitted: true,
+        sendDispatched: submittedValue?.sendDispatched,
+        method: "current-user-turn-proof",
+        reason: submittedValue?.reason,
+        url: value?.url,
+      };
       break;
     }
   }
@@ -299,6 +401,9 @@ const nextRuntime = {
   ...runtime,
   promptSubmitted: Boolean(result.submitted?.submitted),
   tabUrl: result.probe?.url || runtime.tabUrl,
+  chromeHost: host,
+  chromePort: Number(port) || port,
+  chromeTargetId: tab.id,
 };
 const nextMeta = {
   ...meta,
@@ -308,7 +413,7 @@ const nextMeta = {
     runtime: nextRuntime,
   },
   response: result.submitted?.submitted ? { status: "running", incompleteReason: "manual-submit-recovery" } : { status: "error", incompleteReason: "not-submitted" },
-  errorMessage: result.submitted?.submitted ? meta.errorMessage : `Submit recovery failed: ${result.submitted?.reason ?? "unknown"}`,
+  errorMessage: result.submitted?.submitted ? undefined : `Submit recovery failed: ${result.submitted?.reason ?? "unknown"}`,
   updatedAt: now,
   models: Array.isArray(meta.models)
     ? meta.models.map((model) => ({
@@ -319,6 +424,20 @@ const nextMeta = {
     : meta.models,
 };
 fs.writeFileSync(metaPath, `${JSON.stringify(nextMeta, null, 2)}\n`);
+for (const model of nextMeta.models ?? []) {
+  const sidecarPath = path.join(sessionDir, "models", `${model.model}.json`);
+  if (!fs.existsSync(sidecarPath)) continue;
+  const existing = JSON.parse(fs.readFileSync(sidecarPath, "utf8"));
+  fs.writeFileSync(sidecarPath, `${JSON.stringify({
+    ...existing,
+    status: result.submitted?.submitted ? "running" : "error",
+    completedAt: result.submitted?.submitted ? undefined : now,
+    response: result.submitted?.submitted
+      ? { status: "running", incompleteReason: "manual-submit-recovery" }
+      : { status: "error", incompleteReason: "not-submitted" },
+    error: result.submitted?.submitted ? undefined : existing.error,
+  }, null, 2)}\n`);
+}
 fs.writeFileSync(path.join(sessionDir, "live-state.json"), `${JSON.stringify({
   observedAt: now,
   generating: Boolean(result.probe?.generating),
@@ -331,6 +450,7 @@ fs.writeFileSync(path.join(sessionDir, "live-state.json"), `${JSON.stringify({
   session: sessionId,
   sessionStatus: nextMeta.status,
   length: result.probe?.textLength ?? 0,
+  promptMatch: Boolean(result.probe?.promptMatch),
 }, null, 2)}\n`);
 
 console.log(JSON.stringify(result, null, 2));

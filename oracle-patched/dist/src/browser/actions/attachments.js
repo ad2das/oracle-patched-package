@@ -94,6 +94,7 @@ export async function uploadAttachmentFile(deps, attachment, logger, options) {
         })();
         const rootTextRaw = root ? (root.innerText || root.textContent || '') : '';
         const chipSelector = [
+          '[role="group"][class*="file-tile"]',
           '[data-testid*="attachment"]',
           '[data-testid*="chip"]',
           '[data-testid*="upload"]',
@@ -103,7 +104,10 @@ export async function uploadAttachmentFile(deps, attachment, logger, options) {
           '[aria-label*="remove"]',
         ].join(',');
         const localCandidates = scope ? Array.from(scope.querySelectorAll(chipSelector)) : [];
-        const globalCandidates = Array.from(document.querySelectorAll(chipSelector));
+        // Structural file tiles are reused in historical user turns. Never allow an
+        // old attachment with the same name to satisfy the active composer check.
+        const globalCandidates = Array.from(document.querySelectorAll(chipSelector))
+          .filter((node) => !node.matches?.('[role="group"][class*="file-tile"]'));
         const matchCandidates = localCandidates.length > 0 ? localCandidates : globalCandidates;
         const serializeChip = (node) => {
           const text = node?.textContent ?? '';
@@ -468,7 +472,7 @@ export async function uploadAttachmentFile(deps, attachment, logger, options) {
         return parts.length > 0 && parts.every((p) => p.startsWith('image/'));
       };
       const chipContainer = scope ?? document;
-        const chipSelector = '[data-testid*="attachment"],[data-testid*="chip"],[data-testid*="upload"],[data-testid*="file"],[aria-label*="Remove"],[aria-label*="remove"]';
+        const chipSelector = '[role="group"][class*="file-tile"],[data-testid*="attachment"],[data-testid*="chip"],[data-testid*="upload"],[data-testid*="file"],[aria-label*="Remove"],[aria-label*="remove"]';
       const baselineChipCount = chipContainer.querySelectorAll(chipSelector).length;
       const baselineChips = Array.from(chipContainer.querySelectorAll(chipSelector))
         .slice(0, 20)
@@ -741,6 +745,7 @@ export async function uploadAttachmentFile(deps, attachment, logger, options) {
       return null;
     };
     const composerAttachmentSelectors = [
+      '[role="group"][class*="file-tile"]',
       'input[type="file"]',
       '[data-testid*="attachment"]',
       '[data-testid*="upload"]',
@@ -780,7 +785,7 @@ export async function uploadAttachmentFile(deps, attachment, logger, options) {
       return parentHasSend ? parent : root;
     })();
     const chipContainer = scope ?? document;
-    const chipSelector = '[data-testid*="attachment"],[data-testid*="chip"],[data-testid*="upload"],[aria-label*="Remove"],[aria-label*="remove"]';
+    const chipSelector = '[role="group"][class*="file-tile"],[data-testid*="attachment"],[data-testid*="chip"],[data-testid*="upload"],[aria-label*="Remove"],[aria-label*="remove"]';
     const chips = Array.from(chipContainer.querySelectorAll(chipSelector))
       .slice(0, 20)
       .map((node) => ({
@@ -1114,6 +1119,7 @@ export async function clearComposerAttachments(Runtime, timeoutMs, logger) {
       return parentHasSend ? parent : root;
     })();
     const removeSelectors = [
+      '[role="group"][class*="file-tile"] button.behavior-btn',
       '[aria-label="Remove file"]',
       'button[aria-label="Remove file"]',
       '[aria-label*="Remove file"]',
@@ -1129,6 +1135,9 @@ export async function clearComposerAttachments(Runtime, timeoutMs, logger) {
     const removeButtons = scope
       ? Array.from(scope.querySelectorAll(removeSelectors.join(','))).filter(visible)
       : [];
+    const structuralTiles = scope
+      ? Array.from(scope.querySelectorAll('[role="group"][class*="file-tile"]'))
+      : [];
     for (const button of removeButtons.slice(0, 20)) {
       try {
         if (button instanceof HTMLButtonElement) {
@@ -1138,7 +1147,9 @@ export async function clearComposerAttachments(Runtime, timeoutMs, logger) {
         button.click();
       } catch {}
     }
-    const chipCount = removeButtons.length;
+    // Count the actual tile independently of its action button. If ChatGPT changes
+    // or hides that button, cleanup must time out instead of declaring a stale tile gone.
+    const chipCount = Math.max(structuralTiles.length, removeButtons.length);
     const inputs = scope ? Array.from(scope.querySelectorAll('input[type="file"]')) : [];
     let inputCount = 0;
     for (const input of inputs) {
@@ -1196,6 +1207,7 @@ export async function waitForAttachmentCompletion(Runtime, timeoutMs, expectedNa
       return null;
     };
     const attachmentSelectors = [
+      '[role="group"][class*="file-tile"]',
       'input[type="file"]',
       '[data-testid*="attachment"]',
       '[data-testid*="upload"]',
@@ -1259,6 +1271,7 @@ export async function waitForAttachmentCompletion(Runtime, timeoutMs, expectedNa
       });
     });
     const attachmentChipSelectors = [
+      '[role="group"][class*="file-tile"]',
       '[data-testid*="chip"]',
       '[data-testid*="attachment"]',
       '[data-testid*="upload"]',

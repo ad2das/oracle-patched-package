@@ -409,6 +409,13 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
         log(`ERROR: ${message}`);
         markErrorLogged(error);
         const userError = asOracleUserError(error);
+        const latestSessionMeta = mode === "browser"
+            ? await sessionStore.readSession(sessionMeta.id).catch(() => null)
+            : null;
+        // persistRuntimeHint may have written the live port/target after this run's original
+        // sessionMeta snapshot was created. Never overwrite that newer runtime with undefined
+        // while handling a later upload/connection error.
+        const persistedBrowserRuntime = latestSessionMeta?.browser?.runtime ?? sessionMeta.browser?.runtime;
         const connectionLost = userError?.category === "browser-automation" &&
             userError.details?.stage === "connection-lost";
         const assistantTimeout = userError?.category === "browser-automation" &&
@@ -421,7 +428,7 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
         if (connectionLost && mode === "browser") {
             const runtime = userError.details
                 ?.runtime;
-            const recoverableRuntime = runtime ?? sessionMeta.browser?.runtime;
+            const recoverableRuntime = runtime ?? persistedBrowserRuntime;
             const submittedLogEvidence = await hasSubmittedLogEvidence(sessionMeta.id);
             if (!hasRecoverableChatGptConversation(recoverableRuntime) &&
                 recoverableRuntime?.promptSubmitted !== true &&
@@ -470,7 +477,7 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
                 mode,
                 browser: {
                     config: browserConfig,
-                    runtime: runtime ?? sessionMeta.browser?.runtime,
+                    runtime: runtime ?? persistedBrowserRuntime,
                 },
                 response: { status: "running", incompleteReason: "chrome-disconnected" },
             });
@@ -499,7 +506,7 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
                 mode,
                 browser: {
                     config: browserConfig,
-                    runtime: runtime ?? sessionMeta.browser?.runtime,
+                    runtime: runtime ?? persistedBrowserRuntime,
                 },
                 response: { status: "incomplete", incompleteReason: "incomplete-capture" },
                 error: {
@@ -510,7 +517,7 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             });
             const autoReattachIntervalMs = browserConfig?.autoReattachIntervalMs ?? 0;
             if (autoReattachIntervalMs > 0) {
-                const autoRuntime = runtime ?? sessionMeta.browser?.runtime;
+                const autoRuntime = runtime ?? persistedBrowserRuntime;
                 const success = await autoReattachUntilComplete({
                     sessionMeta,
                     runtime: autoRuntime ?? undefined,
@@ -528,10 +535,10 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             return;
         }
         if (attachmentUploadTimeout && mode === "browser") {
-            const runtime = userError.details?.runtime ?? sessionMeta.browser?.runtime;
+            const runtime = userError.details?.runtime ?? persistedBrowserRuntime;
             const submittedLogEvidence = await hasSubmittedLogEvidence(sessionMeta.id);
-            if (!hasRecoverableChatGptConversation(runtime) && runtime?.promptSubmitted !== true && !submittedLogEvidence) {
-                log(dim("Attachment upload readiness timed out before a ChatGPT conversation was created; marking session error."));
+            if (runtime?.promptSubmitted !== true && !submittedLogEvidence) {
+                log(dim("Attachment upload readiness timed out before this prompt was submitted; marking session error."));
                 if (modelForStatus) {
                     await sessionStore.updateModelRun(sessionMeta.id, modelForStatus, {
                         status: "error",
@@ -615,7 +622,7 @@ export async function performSessionRun({ sessionMeta, runOptions, mode, browser
             log(dim(`Transport: ${transportLine}`));
         }
         const browserRuntime = mode === "browser"
-            ? userError?.details?.runtime
+            ? userError?.details?.runtime ?? persistedBrowserRuntime
             : undefined;
         await sessionStore.updateSession(sessionMeta.id, {
             status: "error",

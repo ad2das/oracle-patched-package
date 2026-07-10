@@ -1772,6 +1772,14 @@ async function maybeReuseRunningChrome(userDataDir, logger, options = {}) {
         process: undefined,
     };
 }
+function remoteChromeSharesLocalFiles(host) {
+    const normalized = String(host ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/^\[/, "")
+        .replace(/\]$/, "");
+    return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
+}
 async function runRemoteBrowserMode(promptText, attachments, config, logger, options) {
     const remoteChromeConfig = config.remoteChrome;
     if (!remoteChromeConfig) {
@@ -1972,10 +1980,21 @@ async function runRemoteBrowserMode(promptText, attachments, config, logger, opt
                     throw new Error("Chrome DOM domain unavailable while uploading attachments.");
                 }
                 await clearComposerAttachments(Runtime, 5_000, logger);
-                // Use remote file transfer for remote Chrome (reads local files and injects via CDP)
-                for (const attachment of submissionAttachments) {
+                // Loopback DevTools means Chrome and the CLI share the same filesystem. Use the
+                // normal DOM.setFileInputFiles path in that case: ChatGPT ignores synthetic
+                // DataTransfer change events on its current composer even though input.files is set.
+                // Keep the data-transfer fallback only for a genuinely remote Chrome host.
+                for (let attachmentIndex = 0; attachmentIndex < submissionAttachments.length; attachmentIndex += 1) {
+                    const attachment = submissionAttachments[attachmentIndex];
                     logger(`Uploading attachment: ${attachment.displayPath}`);
-                    await uploadAttachmentViaDataTransfer({ runtime: Runtime, dom: DOM }, attachment, logger);
+                    if (remoteChromeSharesLocalFiles(host)) {
+                        await uploadAttachmentFile({ runtime: Runtime, dom: DOM, input: Input }, attachment, logger, {
+                            expectedCount: attachmentIndex + 1,
+                        });
+                    }
+                    else {
+                        await uploadAttachmentViaDataTransfer({ runtime: Runtime, dom: DOM }, attachment, logger);
+                    }
                     await delay(500);
                 }
                 // Scale timeout based on number of files, but do not leave ChatGPT
@@ -2776,4 +2795,7 @@ function shouldPreferSystemTmpDir(platform, tmpDir, homeDir) {
 }
 export function shouldPreferSystemTmpDirForTest(platform, tmpDir, homeDir) {
     return shouldPreferSystemTmpDir(platform, tmpDir, homeDir);
+}
+export function remoteChromeSharesLocalFilesForTest(host) {
+    return remoteChromeSharesLocalFiles(host);
 }

@@ -167,11 +167,9 @@ function browserSessionForRun(oracleHome, args, startedAtMs = 0) {
 }
 
 function hasSubmittedRuntime(runtime) {
-  return Boolean(
-    runtime?.promptSubmitted === true ||
-    runtime?.conversationId ||
-    isChatGptConversationUrl(runtime?.tabUrl)
-  );
+  // A reused --browser-tab already has a conversationId/tabUrl before this run types
+  // anything. Only the explicit per-run commit flag is submission evidence.
+  return runtime?.promptSubmitted === true;
 }
 
 function sessionLogText(sessionDir) {
@@ -284,22 +282,12 @@ function verifyBrowserSubmissionAfterFailure(args, startedAtMs) {
       promptSubmitted: runtime?.promptSubmitted,
     };
   }
-  if (liveState?.url && isChatGptConversationUrl(liveState.url)) {
-    return {
-      state: "submitted",
-      session: latest.sessionId,
-      reason: "live-state recorded ChatGPT conversation URL",
-      url: liveState.url,
-      generating: liveState.generating,
-    };
-  }
-
   const liveRead = readLiveSessionJson(latest.sessionId);
   if (liveRead.ok) {
     const output = liveRead.value;
     const url = output?.url || output?.tabUrl;
     const textLength = Number(output?.length ?? 0) || 0;
-    if (isChatGptConversationUrl(url) && (output?.generating || textLength > 0)) {
+    if (isChatGptConversationUrl(url) && output?.promptMatch === true && (output?.generating || textLength > 0)) {
       return {
         state: "submitted",
         session: latest.sessionId,
@@ -682,10 +670,9 @@ function reconcileNotSubmittedBrowserSessions() {
     // before promptSubmitted=true, treat the browser tab as abandoned instead
     // of blocking future runs forever.
     if (!allModelsNotSubmitted && isProcessAlive(runtime?.controllerPid)) continue;
-    if (runtime?.promptSubmitted === true || isChatGptConversationUrl(runtime?.tabUrl) || runtime?.conversationId) continue;
+    if (runtime?.promptSubmitted === true) continue;
     const liveState = readJson(join(sessionDir, "live-state.json"));
-    const liveUrl = liveState?.url || liveState?.tabUrl;
-    if (liveState?.generating || isChatGptConversationUrl(liveUrl)) continue;
+    if (liveState?.generating && liveState?.promptMatch === true) continue;
     const outputLog = join(sessionDir, "output.log");
     let outputSize = 0;
     try {
@@ -914,6 +901,10 @@ function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
     console.error("[oracle-wrapper] The browser command failed, but the prompt appears submitted. Do not retry blindly; recover/read this session first.");
     console.error(`[oracle-wrapper] Recover now with: node "${join(scriptDir, "run-oracle.mjs")}" session "${verification.session}" --render`);
   } else if (verification.state === "not_submitted") {
+    if (!allowRetry) {
+      console.error("[oracle-wrapper] The prompt is still not submitted after the one allowed recovery pass; refusing a second live-submit attempt.");
+      return;
+    }
     console.error("[oracle-wrapper] The prompt appears not submitted after live verification. Attempting automatic live-submit recovery.");
     const recovery = submitLiveChatGptSession(verification.session);
     console.error(`[oracle-wrapper] live-submit recovery result: ${JSON.stringify({
@@ -950,7 +941,11 @@ function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
         process.exit(retry.status ?? 1);
       }
     }
-    if (allowRetry && process.env.ORACLE_SKIP_NOT_SUBMITTED_RETRY !== "1") {
+    if (
+      allowRetry &&
+      process.env.ORACLE_SKIP_NOT_SUBMITTED_RETRY !== "1" &&
+      !browserConnectionPinned(args)
+    ) {
       console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once because submission was verified not_submitted.");
       const retryStartedAtMs = Date.now();
       const retry = runOracleCli(args, { ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1" });
