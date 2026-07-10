@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
 
@@ -260,20 +261,49 @@ function clearLiveStateAfterFailedRead(attempts) {
 
 function readSessionRuntime(id) {
   const meta = readSessionMeta(id);
+  return resolveSessionRuntimeForRecovery(meta);
+}
+
+function isChatGptConversationUrl(value) {
+  return /chatgpt\.com\/(?:g\/[^/]+\/)?(?:c\/|chat\/)[^/?#]+/i.test(String(value ?? ""));
+}
+
+export function resolveSessionRuntimeForRecovery(meta) {
+  if (!meta) return null;
   const runtime = meta?.browser?.runtime ?? {};
   const config = meta?.browser?.config ?? meta?.options?.browserConfig ?? {};
   const remoteChrome = config.remoteChrome ?? {};
+  const archiveConversationUrl = meta?.browser?.archive?.conversationUrl;
+  const preferredConversationUrl = [
+    runtime.tabUrl,
+    archiveConversationUrl,
+    config.browserTabRef,
+  ].find(isChatGptConversationUrl);
+  const selectedTabUrl = preferredConversationUrl ?? runtime.tabUrl ?? config.browserTabRef;
+  const selectedConversationId = conversationIdFromUrl(selectedTabUrl);
   const enriched = {
     ...runtime,
     chromePort: runtime.chromePort ?? remoteChrome.port,
     chromeHost: runtime.chromeHost ?? remoteChrome.host,
-    tabUrl: runtime.tabUrl ?? config.browserTabRef,
+    // Archive metadata is written from the live DOM and can retain the real
+    // /c/... URL even when the controller's last runtime hint regressed to /.
+    tabUrl: selectedTabUrl,
+    conversationId: selectedConversationId ?? runtime.conversationId,
   };
   return Object.values(enriched).some((value) => value != null && value !== "") ? enriched : null;
 }
 
 function normalizeText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+export function isGenerationStatusTextForTest(value) {
+  const text = normalizeText(value).replace(/[.…·•]+$/u, "").trim();
+  if (!text || text.length > 160) return false;
+  if (/^(?:pro\s+)?(?:thinking|finalizing(?:\s+the)?\s+answer|still\s+working|working\s+on(?:\s+it)?|i['’]m\s+(?:thinking|considering))$/i.test(text)) {
+    return true;
+  }
+  return /^(?:pro\s*)?(?:생각(?:하(?:는|고\s*있는)?)?\s*중|(?:최종\s*)?(?:답변|응답)(?:을)?\s*(?:마무리(?:하(?:는|고\s*있는)?)?|생성(?:하(?:는|고\s*있는)?)?|작성(?:하(?:는|고\s*있는)?)?)\s*중|마무리\s*중)$/iu.test(text);
 }
 
 function sessionPrompt(meta) {
@@ -332,6 +362,27 @@ function scoreTab(tab, runtime) {
   return score;
 }
 
+export function selectSessionTargetForRecovery(tabs, runtime) {
+  if (!Array.isArray(tabs) || tabs.length === 0) return null;
+  const preferredUrl = String(runtime?.tabUrl ?? "");
+  const preferredConversationId = runtime?.conversationId ?? conversationIdFromUrl(preferredUrl);
+  if (isChatGptConversationUrl(preferredUrl)) {
+    const conversationTarget = tabs.find((tab) => {
+      const tabUrl = String(tab?.url ?? "");
+      return tabUrl === preferredUrl || (
+        preferredConversationId && conversationIdFromUrl(tabUrl) === preferredConversationId
+      );
+    });
+    // A stale root target must not outrank the persisted conversation. Returning
+    // null makes the caller open the authoritative /c/... URL immediately.
+    return conversationTarget ?? null;
+  }
+  return tabs
+    .map((tab) => ({ tab, score: scoreTab(tab, runtime) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.tab ?? null;
+}
+
 async function cdpEvaluate(webSocketDebuggerUrl, expression) {
   const ws = new WebSocket(webSocketDebuggerUrl);
   const pending = new Map();
@@ -385,12 +436,38 @@ function buildDomProbeExpression(tail, needles = []) {
   return `(() => {
         const text = document.body.innerText || "";
         const promptNeedles = ${encodedNeedles};
+        const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim();
+        const isVisible = (node) => {
+          if (!(node instanceof Element)) return false;
+          const style = window.getComputedStyle(node);
+          if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const isGenerationStatusText = (value) => {
+          const candidate = normalize(value).replace(/[.…·•]+$/u, '').trim();
+          if (!candidate || candidate.length > 160) return false;
+          if (/^(?:pro\\s+)?(?:thinking|finalizing(?:\\s+the)?\\s+answer|still\\s+working|working\\s+on(?:\\s+it)?|i['’]m\\s+(?:thinking|considering))$/i.test(candidate)) return true;
+          return /^(?:pro\\s*)?(?:생각(?:하(?:는|고\\s*있는)?)?\\s*중|(?:최종\\s*)?(?:답변|응답)(?:을)?\\s*(?:마무리(?:하(?:는|고\\s*있는)?)?|생성(?:하(?:는|고\\s*있는)?)?|작성(?:하(?:는|고\\s*있는)?)?)\\s*중|마무리\\s*중)$/iu.test(candidate);
+        };
         const labels = [...document.querySelectorAll('button,[role="button"]')]
           .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
         const stopExists = labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label));
-        const stoppedThinking = /\\bStopped thinking\\b/i.test(text);
-        const thinkingText = !stoppedThinking && /\\b(Pro thinking|Finalizing answer|Thinking|I['’]m considering|I['’]m thinking|Still working|Working on)\\b|생각 중|응답 생성/i.test(text);
+        const assistantTurnNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+        const statusNodes = [...document.querySelectorAll(
+          '[role="status"],[aria-live="polite"],[data-testid*="thinking"],[data-testid*="reasoning"],span.loading-shimmer'
+        )];
+        const generationCandidates = [...statusNodes, ...assistantTurnNodes.slice(-1)].filter(isVisible);
+        let generationStatusText = '';
+        for (let index = generationCandidates.length - 1; index >= 0; index -= 1) {
+          const candidate = normalize(generationCandidates[index].innerText || generationCandidates[index].textContent || '');
+          if (isGenerationStatusText(candidate)) {
+            generationStatusText = candidate;
+            break;
+          }
+        }
+        const thinkingText = Boolean(generationStatusText);
         const articles = [...document.querySelectorAll('article,[data-message-author-role],[data-turn]')]
           .map((node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
@@ -430,6 +507,8 @@ function buildDomProbeExpression(tail, needles = []) {
           promptMatch: promptNeedles.some((needle) => userMessages.some((message) => message.includes(needle))),
           generating: stopExists || thinkingText,
           stopExists,
+          thinkingStatusVisible: thinkingText,
+          generationStatusText,
           articleCount: articles.length,
           assistantCount: assistantMessages.length,
           userCount: userMessages.length,
@@ -442,8 +521,8 @@ function buildDomProbeExpression(tail, needles = []) {
       })()`;
 }
 
-function sessionMatchEvidence({ target, value, meta, runtime }) {
-  if (!sessionId) return { matched: true, reason: "no session filter" };
+function sessionMatchEvidence({ target, value, meta, runtime, requireSessionFilter = Boolean(sessionId) }) {
+  if (!requireSessionFilter) return { matched: true, reason: "no session filter" };
   const targetUrl = String(target?.url ?? "");
   const valueUrl = String(value?.url ?? "");
   const urls = `${targetUrl}\n${valueUrl}`;
@@ -451,10 +530,10 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
   const hasSubmittedRuntime = runtime?.promptSubmitted === true;
   const expectedConversationId = runtime?.conversationId;
   const actualConversationId = conversationIdFromUrl(valueUrl) || conversationIdFromUrl(targetUrl);
-  if (expectedConversationId && actualConversationId && expectedConversationId !== actualConversationId) {
+  if (expectedConversationId && actualConversationId !== expectedConversationId) {
     return {
       matched: false,
-      reason: "conversationId-mismatch",
+      reason: actualConversationId ? "conversationId-mismatch" : "expected-conversation-not-loaded",
       expected: { conversationId: expectedConversationId, tabUrl: runtime?.tabUrl },
       actual: { conversationId: actualConversationId, tabId: target?.id, tabTitle: target?.title, tabUrl: targetUrl, url: valueUrl },
     };
@@ -494,6 +573,10 @@ function sessionMatchEvidence({ target, value, meta, runtime }) {
       promptMatch: Boolean(value?.promptMatch),
     },
   };
+}
+
+export function sessionMatchEvidenceForTest(input) {
+  return sessionMatchEvidence({ ...input, requireSessionFilter: true });
 }
 
 async function readTarget({ target, port, sessionMeta, sessionRuntime, needles, opened }) {
@@ -556,12 +639,17 @@ async function main() {
   for (const port of ports) {
     try {
       const tabs = await listTabs(port);
-      const ranked = tabs
-        .map((tab) => ({ tab, score: scoreTab(tab, sessionRuntime) }))
-        .filter((entry) => entry.score > 0)
-        .sort((a, b) => b.score - a.score);
-      let target = ranked[0]?.tab;
+      let target = selectSessionTargetForRecovery(tabs, sessionRuntime);
       let opened = false;
+      if (
+        !target?.webSocketDebuggerUrl &&
+        isChatGptConversationUrl(sessionTabUrl) &&
+        !noOpenMissing
+      ) {
+        target = await openSessionTab(port, sessionTabUrl);
+        opened = true;
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
       if (!target?.webSocketDebuggerUrl && sessionTabUrl && !noOpenMissing) {
         target = await openSessionTab(port, sessionTabUrl);
         opened = true;
@@ -628,7 +716,10 @@ async function main() {
   process.exit(1);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exit(1);
-});
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
+if (invokedPath === import.meta.url) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exit(1);
+  });
+}

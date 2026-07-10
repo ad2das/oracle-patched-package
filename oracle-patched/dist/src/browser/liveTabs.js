@@ -30,6 +30,23 @@ function normalizeTitle(value) {
         .replace(/\s+/g, " ")
         .trim();
 }
+function isGenerationStatusText(value) {
+    const text = String(value ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[.…·•]+$/u, "")
+        .trim();
+    if (!text || text.length > 160) {
+        return false;
+    }
+    if (/^(?:pro\s+)?(?:thinking|finalizing(?:\s+the)?\s+answer|still\s+working|working\s+on(?:\s+it)?|i['’]m\s+(?:thinking|considering))$/i.test(text)) {
+        return true;
+    }
+    return /^(?:pro\s*)?(?:생각(?:하(?:는|고\s*있는)?)?\s*중|(?:최종\s*)?(?:답변|응답)(?:을)?\s*(?:마무리(?:하(?:는|고\s*있는)?)?|생성(?:하(?:는|고\s*있는)?)?|작성(?:하(?:는|고\s*있는)?)?)\s*중|마무리\s*중)$/iu.test(text);
+}
+export function isGenerationStatusTextForTest(value) {
+    return isGenerationStatusText(value);
+}
 function buildTargetFingerprint(summary) {
     return createHash("sha1")
         .update(`${summary.targetId ?? ""}|${summary.url ?? ""}|${summary.lastAssistantText ?? ""}`)
@@ -80,6 +97,16 @@ function buildTabInspectionExpression() {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
+      const isGenerationStatusText = (value) => {
+        const text = String(value ?? '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .replace(/[.…·•]+$/u, '')
+          .trim();
+        if (!text || text.length > 160) return false;
+        if (/^(?:pro\s+)?(?:thinking|finalizing(?:\s+the)?\s+answer|still\s+working|working\s+on(?:\s+it)?|i['’]m\s+(?:thinking|considering))$/i.test(text)) return true;
+        return /^(?:pro\s*)?(?:생각(?:하(?:는|고\s*있는)?)?\s*중|(?:최종\s*)?(?:답변|응답)(?:을)?\s*(?:마무리(?:하(?:는|고\s*있는)?)?|생성(?:하(?:는|고\s*있는)?)?|작성(?:하(?:는|고\s*있는)?)?)\s*중|마무리\s*중)$/iu.test(text);
+      };
       const firstVisible = (selectors) => {
         for (const selector of selectors) {
           const node = document.querySelector(selector);
@@ -126,12 +153,27 @@ function buildTabInspectionExpression() {
       const assistantCount = assistantTurns.length > 0 ? assistantTurns.length : answerTexts.length;
       const lastAssistantText = assistantTexts[assistantTexts.length - 1] || answerTexts[answerTexts.length - 1] || '';
       const lastUserText = userTexts[userTexts.length - 1] || '';
-      const authenticated = !loginButtonExists && (promptReady || sendExists || stopExists || assistantCount > 0);
+      const statusNodes = Array.from(document.querySelectorAll(
+        '[role="status"],[aria-live="polite"],[data-testid*="thinking"],[data-testid*="reasoning"],span.loading-shimmer'
+      ));
+      const generationCandidates = [...statusNodes, ...assistantTurns.slice(-1)].filter((node) => isVisible(node));
+      let generationStatusText = '';
+      for (let index = generationCandidates.length - 1; index >= 0; index -= 1) {
+        const candidate = normalize(generationCandidates[index].innerText || generationCandidates[index].textContent || '');
+        if (isGenerationStatusText(candidate)) {
+          generationStatusText = candidate;
+          break;
+        }
+      }
+      const thinkingStatusVisible = Boolean(generationStatusText);
+      const authenticated = !loginButtonExists && (promptReady || sendExists || stopExists || thinkingStatusVisible || assistantCount > 0);
       return {
         title: normalize(document.title),
         url: location.href,
         currentModelLabel,
         stopExists,
+        thinkingStatusVisible,
+        generationStatusText,
         sendExists,
         promptReady,
         loginButtonExists,
@@ -195,6 +237,8 @@ export async function inspectChatGptTab(options) {
             url: normalizeUrl(info.url ?? target.url ?? ""),
             currentModelLabel: normalizeTitle(info.currentModelLabel ?? ""),
             stopExists: Boolean(info.stopExists),
+            thinkingStatusVisible: Boolean(info.thinkingStatusVisible),
+            generationStatusText: normalizeTitle(info.generationStatusText ?? ""),
             sendExists: Boolean(info.sendExists),
             promptReady: Boolean(info.promptReady),
             loginButtonExists: Boolean(info.loginButtonExists),
@@ -225,7 +269,7 @@ export function classifyTabState(summary) {
     if (!summary?.authenticated) {
         return "detached";
     }
-    if (summary.stopExists) {
+    if (summary.stopExists || summary.thinkingStatusVisible || isGenerationStatusText(summary.lastAssistantText)) {
         return "running";
     }
     if (summary.sendExists || summary.promptReady || summary.assistantCount > 0) {
@@ -378,6 +422,8 @@ export async function harvestChatGptTab(options = {}) {
                 },
             });
             harvested.stopExists = followup.stopExists;
+            harvested.thinkingStatusVisible = followup.thinkingStatusVisible;
+            harvested.generationStatusText = followup.generationStatusText;
             harvested.sendExists = followup.sendExists;
             harvested.promptReady = followup.promptReady;
             harvested.currentModelLabel = followup.currentModelLabel;

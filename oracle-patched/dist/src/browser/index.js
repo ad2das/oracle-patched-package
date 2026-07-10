@@ -5,7 +5,7 @@ import net from "node:net";
 import { resolveBrowserConfig } from "./config.js";
 import { launchChrome, registerTerminationHooks, hideChromeWindow, connectToRemoteChrome, connectWithNewTab, closeTab, closeRemoteChromeTarget, closeBlankChromeTabs, } from "./chromeLifecycle.js";
 import { syncCookies } from "./cookies.js";
-import { navigateToChatGPT, navigateToPromptReadyWithFallback, ensureNotBlocked, ensureLoggedIn, ensurePromptReady, installJavaScriptDialogAutoDismissal, ensureModelSelection, clearPromptComposer, waitForAssistantResponse, captureAssistantMarkdown, clearComposerAttachments, uploadAttachmentFile, waitForAttachmentCompletion, waitForUserTurnAttachments, readAssistantSnapshot, } from "./pageActions.js";
+import { navigateToChatGPT, navigateToPromptReadyWithFallback, ensureNotBlocked, ensureLoggedIn, ensurePromptReady, installJavaScriptDialogAutoDismissal, ensureModelSelection, clearPromptComposer, waitForAssistantResponse, captureAssistantMarkdown, clearComposerAttachments, uploadAttachmentFile, waitForAttachmentCompletion, waitForUserTurnAttachments, readAssistantSnapshot, isAssistantGenerationVisible, } from "./pageActions.js";
 import { INPUT_SELECTORS } from "./constants.js";
 import { uploadAttachmentViaDataTransfer } from "./actions/remoteFileTransfer.js";
 import { ensureThinkingTime } from "./actions/thinkingTime.js";
@@ -2548,21 +2548,35 @@ export function isWebSocketClosureError(error) {
         message.includes("target closed"));
 }
 async function waitForAssistantResponseWithReload(Runtime, Page, timeoutMs, logger, minTurnIndex, expectedConversationId) {
-    try {
-        return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
-    }
-    catch (error) {
-        if (!shouldReloadAfterAssistantError(error)) {
-            throw error;
+    let reloaded = false;
+    while (true) {
+        try {
+            return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
         }
-        const conversationUrl = await readConversationUrl(Runtime);
-        if (!conversationUrl || !isConversationUrl(conversationUrl)) {
-            throw error;
+        catch (error) {
+            if (!shouldReloadAfterAssistantError(error)) {
+                throw error;
+            }
+            // A visible stop control or localized thinking/finalizing status is
+            // authoritative. Long Pro runs may exceed the ordinary response
+            // watchdog without being stalled; preserve the live conversation
+            // and extend the wait instead of reloading it.
+            if (await isAssistantGenerationVisible(Runtime).catch(() => false)) {
+                logger("Assistant is still generating; extending response wait without reload");
+                continue;
+            }
+            if (reloaded) {
+                throw error;
+            }
+            const conversationUrl = await readConversationUrl(Runtime);
+            if (!conversationUrl || !isConversationUrl(conversationUrl)) {
+                throw error;
+            }
+            reloaded = true;
+            logger("Assistant response stalled; reloading conversation and retrying once");
+            await Page.navigate({ url: conversationUrl });
+            await delay(1000);
         }
-        logger("Assistant response stalled; reloading conversation and retrying once");
-        await Page.navigate({ url: conversationUrl });
-        await delay(1000);
-        return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
     }
 }
 function shouldReloadAfterAssistantError(error) {

@@ -3,10 +3,42 @@ import { delay } from "../utils.js";
 import { logDomFailure, logConversationSnapshot, buildConversationDebugExpression, } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
 const ASSISTANT_POLL_TIMEOUT_ERROR = "assistant-response-watchdog-timeout";
+function normalizeGenerationStatusText(value) {
+    return String(value ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[.…·•]+$/u, "")
+        .trim();
+}
+function isAssistantGenerationStatusText(value) {
+    const text = normalizeGenerationStatusText(value);
+    if (!text || text.length > 160) {
+        return false;
+    }
+    if (/^(?:pro\s+)?(?:thinking|finalizing(?:\s+the)?\s+answer|still\s+working|working\s+on(?:\s+it)?|i['’]m\s+(?:thinking|considering))$/i.test(text)) {
+        return true;
+    }
+    return /^(?:pro\s*)?(?:생각(?:하(?:는|고\s*있는)?)?\s*중|(?:최종\s*)?(?:답변|응답)(?:을)?\s*(?:마무리(?:하(?:는|고\s*있는)?)?|생성(?:하(?:는|고\s*있는)?)?|작성(?:하(?:는|고\s*있는)?)?)\s*중|마무리\s*중)$/iu.test(text);
+}
+function buildGenerationStatusMatcherSource(functionName) {
+    return `const ${functionName} = (value) => {
+      const text = String(value ?? '')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .replace(/[.…·•]+$/u, '')
+        .trim();
+      if (!text || text.length > 160) return false;
+      if (/^(?:pro\\s+)?(?:thinking|finalizing(?:\\s+the)?\\s+answer|still\\s+working|working\\s+on(?:\\s+it)?|i['’]m\\s+(?:thinking|considering))$/i.test(text)) return true;
+      return /^(?:pro\\s*)?(?:생각(?:하(?:는|고\\s*있는)?)?\\s*중|(?:최종\\s*)?(?:답변|응답)(?:을)?\\s*(?:마무리(?:하(?:는|고\\s*있는)?)?|생성(?:하(?:는|고\\s*있는)?)?|작성(?:하(?:는|고\\s*있는)?)?)\\s*중|마무리\\s*중)$/iu.test(text);
+    };`;
+}
 function isAnswerNowPlaceholderText(normalized) {
     const text = normalized.trim();
     if (!text)
         return false;
+    // Localized Pro UI labels are generation chrome, never final answers.
+    if (isAssistantGenerationStatusText(text))
+        return true;
     // Learned: "Pro thinking" shows a placeholder turn that contains "Answer now".
     // That is not the final answer and must be ignored in browser automation.
     if (text === "chatgpt said:" || text === "chatgpt said")
@@ -16,6 +48,12 @@ function isAnswerNowPlaceholderText(normalized) {
         return true;
     }
     return (text.includes("answer now") && (text.includes("pro thinking") || text.includes("chatgpt said")));
+}
+export function isAssistantGenerationStatusTextForTest(value) {
+    return isAssistantGenerationStatusText(value);
+}
+export function isAnswerNowPlaceholderTextForTest(value) {
+    return isAnswerNowPlaceholderText(String(value ?? "").toLowerCase());
 }
 export async function waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId) {
     const start = Date.now();
@@ -117,20 +155,26 @@ export async function waitForAssistantResponse(Runtime, timeoutMs, logger, minTu
     const elapsedMs = Date.now() - start;
     const remainingMs = Math.max(0, timeoutMs - elapsedMs);
     if (remainingMs > 0) {
-        const [stopVisible, completionVisible] = await Promise.all([
-            isStopButtonVisible(Runtime),
+        const [generationVisible, completionVisible] = await Promise.all([
+            isAssistantGenerationVisible(Runtime),
             isCompletionVisible(Runtime),
         ]);
-        if (stopVisible) {
+        if (generationVisible) {
             logger("Assistant still generating; waiting for completion");
             const completed = await pollAssistantCompletion(Runtime, remainingMs, minTurnIndex, expectedConversationId);
             if (completed) {
                 return completed;
             }
+            if (await isAssistantGenerationVisible(Runtime)) {
+                throw new Error("assistant-response-live-generation-timeout");
+            }
         }
         else if (completionVisible) {
             // No-op: completion UI surfaced and stop button is gone.
         }
+    }
+    if (await isAssistantGenerationVisible(Runtime)) {
+        throw new Error("assistant-response-live-generation-timeout");
     }
     return candidate;
 }
@@ -309,8 +353,8 @@ async function pollAssistantCompletion(Runtime, timeoutMs, minTurnIndex, expecte
             else {
                 stableCycles += 1;
             }
-            const [stopVisible, completionVisible] = await Promise.all([
-                isStopButtonVisible(Runtime),
+            const [generationVisible, completionVisible] = await Promise.all([
+                isAssistantGenerationVisible(Runtime),
                 isCompletionVisible(Runtime),
             ]);
             if (isGeneratedImageAssistantAnswer(normalized)) {
@@ -326,8 +370,8 @@ async function pollAssistantCompletion(Runtime, timeoutMs, minTurnIndex, expecte
             const requiredStableCycles = shortAnswer ? 12 : mediumAnswer ? 8 : longAnswer ? 8 : 10;
             const stableMs = Date.now() - lastChangeAt;
             const minStableMs = shortAnswer ? 8000 : mediumAnswer ? 1200 : longAnswer ? 2000 : 3000;
-            // Require stop button to disappear before treating completion as final.
-            if (!stopVisible) {
+            // Require every authoritative generation indicator to disappear.
+            if (!generationVisible) {
                 const stableEnough = stableCycles >= requiredStableCycles && stableMs >= minStableMs;
                 const completionEnough = completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
                 if (completionEnough || stableEnough) {
@@ -343,15 +387,31 @@ async function pollAssistantCompletion(Runtime, timeoutMs, minTurnIndex, expecte
     }
     return null;
 }
-async function isStopButtonVisible(Runtime) {
+export async function isAssistantGenerationVisible(Runtime) {
     try {
         const { result } = await Runtime.evaluate({
             expression: `(() => {
         if (document.querySelector('${STOP_BUTTON_SELECTOR}')) return true;
+        ${buildGenerationStatusMatcherSource("isGenerationStatusText")}
+        const isVisible = (node) => {
+          if (!(node instanceof Element)) return false;
+          const style = window.getComputedStyle(node);
+          if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
         const labels = Array.from(document.querySelectorAll('button,[role="button"]'))
           .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
           .filter(Boolean);
-        return labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label));
+        if (labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label))) return true;
+        const statusNodes = Array.from(document.querySelectorAll(
+          '[role="status"],[aria-live="polite"],[data-testid*="thinking"],[data-testid*="reasoning"],span.loading-shimmer,[data-message-author-role="assistant"]'
+        ));
+        for (let index = statusNodes.length - 1; index >= 0; index -= 1) {
+          const node = statusNodes[index];
+          if (isVisible(node) && isGenerationStatusText(node.innerText || node.textContent || '')) return true;
+        }
+        return false;
       })()`,
             returnByValue: true,
         });
@@ -431,6 +491,9 @@ function normalizeAssistantSnapshot(snapshot) {
         },
     };
 }
+export async function isAssistantGenerationVisibleForTest(Runtime) {
+    return isAssistantGenerationVisible(Runtime);
+}
 function isGeneratedImageAssistantAnswer(answer) {
     return Boolean(answer?.html?.includes("/backend-api/estuary/content?id=file_"));
 }
@@ -466,9 +529,11 @@ function buildAssistantSnapshotExpression(minTurnIndex, expectedConversationId) 
     }
     // Learned: the default turn DOM misses project view; keep a fallback extractor.
     ${buildAssistantExtractor("extractAssistantTurn")}
+    ${buildGenerationStatusMatcherSource("isGenerationStatusText")}
     const extracted = extractAssistantTurn();
     const isPlaceholder = (snapshot) => {
       const normalized = String(snapshot?.text ?? '').toLowerCase().trim();
+      if (isGenerationStatusText(normalized)) return true;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
@@ -512,8 +577,10 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
       const currentId = currentConversationId();
       return !currentId || currentId === EXPECTED_CONVERSATION_ID;
     };
+    ${buildGenerationStatusMatcherSource("isGenerationStatusText")}
     const isAnswerNowPlaceholder = (snapshot) => {
       const normalized = String(snapshot?.text ?? '').toLowerCase().trim();
+      if (isGenerationStatusText(normalized)) return true;
       if (normalized === 'chatgpt said:' || normalized === 'chatgpt said') return true;
       if (normalized.includes('file upload request') && (normalized.includes('pro thinking') || normalized.includes('chatgpt said'))) {
         return true;
@@ -662,7 +729,22 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
       const labels = Array.from(document.querySelectorAll('button,[role="button"]'))
         .map((node) => (node.getAttribute('aria-label') || node.textContent || '').replace(/\\s+/g, ' ').trim())
         .filter(Boolean);
-      return labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label));
+      if (labels.some((label) => /\\b(stop answering|stop generating)\\b|생성 중지|중지/i.test(label))) return true;
+      const isVisible = (node) => {
+        if (!(node instanceof Element)) return false;
+        const style = window.getComputedStyle(node);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const statusNodes = Array.from(document.querySelectorAll(
+        '[role="status"],[aria-live="polite"],[data-testid*="thinking"],[data-testid*="reasoning"],span.loading-shimmer,[data-message-author-role="assistant"]'
+      ));
+      for (let index = statusNodes.length - 1; index >= 0; index -= 1) {
+        const node = statusNodes[index];
+        if (isVisible(node) && isGenerationStatusText(node.innerText || node.textContent || '')) return true;
+      }
+      return false;
     };
 
     const waitForSettle = async (snapshot) => {

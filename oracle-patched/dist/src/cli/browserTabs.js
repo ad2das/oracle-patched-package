@@ -217,7 +217,7 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
     }
 }
 export function deriveLiveTailState(harvested) {
-    if (harvested?.stopExists) {
+    if (harvested?.stopExists || harvested?.thinkingStatusVisible) {
         return "running";
     }
     return harvested?.authenticated ? "completed" : "detached";

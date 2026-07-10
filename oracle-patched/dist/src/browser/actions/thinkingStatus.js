@@ -135,12 +135,13 @@ export function sanitizeThinkingText(raw) {
         return "";
     }
     const trimmed = raw.replace(/\s+/g, " ").trim();
-    const prefixPattern = /^(pro thinking)\s*[•:\-–—]*\s*/i;
-    const normalized = prefixPattern.test(trimmed)
+    const prefixPattern = /^(?:pro\s+thinking|pro\s*생각\s*중|생각\s*중|(?:최종\s*)?(?:답변|응답)(?:을)?\s*(?:마무리|생성|작성)(?:하는)?\s*중)\s*[•:\-–—]*\s*/iu;
+    const hasKnownStatusPrefix = prefixPattern.test(trimmed);
+    const normalized = hasKnownStatusPrefix
         ? trimmed.replace(prefixPattern, "").trim()
         : trimmed;
     if (!normalized) {
-        return "";
+        return hasKnownStatusPrefix ? "active" : "";
     }
     const normalizedKey = normalized.toLowerCase();
     return SAFE_THINKING_STATUS_MESSAGES.has(normalizedKey) ? normalizedKey : "active";
@@ -156,7 +157,17 @@ function buildThinkingStatusExpression() {
         '[role="status"]',
         '[aria-live="polite"]',
     ];
-    const keywords = ["pro thinking", "thinking", "reasoning"];
+    const keywords = [
+        "pro thinking",
+        "thinking",
+        "reasoning",
+        "생각 중",
+        "마무리 중",
+        "답변 마무리",
+        "응답 마무리",
+        "답변 생성",
+        "응답 생성",
+    ];
     const selectorLiteral = JSON.stringify(selectors);
     const keywordsLiteral = JSON.stringify(keywords);
     return `(async () => {
@@ -198,6 +209,12 @@ function buildThinkingStatusExpression() {
         label.includes('thinking') ||
         label.includes('reasoning') ||
         label.includes('pro thinking') ||
+        label.includes('생각 중') ||
+        label.includes('마무리 중') ||
+        label.includes('답변 마무리') ||
+        label.includes('응답 마무리') ||
+        label.includes('답변 생성') ||
+        label.includes('응답 생성') ||
         label.includes('myslen') ||
         label.includes('mysl') ||
         label.includes('rozumow')
