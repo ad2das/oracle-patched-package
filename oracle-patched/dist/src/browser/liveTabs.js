@@ -325,6 +325,27 @@ export async function collectChatGptTabs(options = {}) {
         return rightScore - leftScore;
     });
 }
+function resolveExactChatGptTarget(targets, ref, host, port) {
+    const trimmedRef = String(ref ?? "").trim();
+    if (!trimmedRef || trimmedRef.toLowerCase() === "current") {
+        return null;
+    }
+    const target = targets.find((candidate) => extractTargetId(candidate) === trimmedRef) ??
+        targets.find((candidate) => normalizeUrl(candidate?.url) === trimmedRef);
+    if (!target) {
+        return null;
+    }
+    return {
+        host,
+        port,
+        targetId: extractTargetId(target) ?? "",
+        title: normalizeTitle(target.title ?? ""),
+        url: normalizeUrl(target.url ?? ""),
+    };
+}
+export function resolveExactChatGptTargetForTest(targets, ref, host = DEFAULT_REMOTE_CHROME_HOST, port = DEFAULT_REMOTE_CHROME_PORT) {
+    return resolveExactChatGptTarget(targets, ref, host, port);
+}
 function resolveChatGptTabFromSummaries(summaries, ref) {
     if (!Array.isArray(summaries) || summaries.length === 0) {
         throw new Error("No live ChatGPT tabs found on the configured Chrome DevTools endpoint.");
@@ -359,6 +380,15 @@ export function resolveChatGptTabFromSummariesForTest(summaries, ref) {
 }
 export async function resolveChatGptTab(options = {}) {
     const { host, port } = normalizeHostPort(options);
+    // An explicit target id/full URL is already authoritative. Do not synchronously
+    // inspect every open ChatGPT tab before attaching: a large or still-generating
+    // unrelated conversation can leave Runtime.evaluate/readAssistantSnapshot waiting
+    // indefinitely and prevent this exact tab from ever receiving its prompt.
+    const targets = await listChatGptTargets({ host, port });
+    const exact = resolveExactChatGptTarget(targets, options.ref, host, port);
+    if (exact) {
+        return exact;
+    }
     const summaries = await collectChatGptTabs({ host, port });
     return resolveChatGptTabFromSummaries(summaries, options.ref);
 }
