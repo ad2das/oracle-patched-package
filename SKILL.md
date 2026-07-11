@@ -47,6 +47,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Session-scoped live recovery rejects unrelated ChatGPT tabs unless they match the requested Oracle session by Chrome target id, conversation id/URL, persisted live-state URL, or the original prompt fingerprint.
 - Submission verification treats session logs showing ChatGPT response activity (`ChatGPT thinking`, `status=active`, stop-generating/finalizing signals) as submitted evidence even when `promptSubmitted=false` or the conversation URL was not persisted before a disconnect.
 - Browser failure recovery now matches the session for the current prompt/run instead of blindly using the newest browser session.
+- Browser failure recovery requires a session created by the current CLI invocation and an exact normalized full-prompt fingerprint match; preflight failures that create no session never recover an older completed answer.
 - If a matched browser session completed despite a CLI failure/interruption, the wrapper renders `session <id> --render` immediately to recover the answer.
 - Long review-style browser runs that complete with a suspiciously tiny answer are rejected after rendering the transcript, so callers do not treat outputs like `I` as valid reviews.
 - Suspiciously tiny review answers are also rejected when the browser answer was recovered from a live ChatGPT conversation or when a caller later runs `session <id> --render`; transcript answer length is checked when token usage is unavailable.

@@ -4,6 +4,11 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import {
+  matchNewBrowserSession,
+  promptForArgs,
+  sessionPrompt,
+} from "./run-oracle-session-match.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptDir);
@@ -120,50 +125,21 @@ function listSessionDirs(oracleHome) {
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-function newestBrowserSession(oracleHome) {
-  for (const item of listSessionDirs(oracleHome)) {
-    const meta = readSessionMeta(oracleHome, item.sessionId);
-    if (meta?.mode === "browser" || meta?.engine === "browser") return { ...item, meta };
-  }
-  return null;
-}
-
-function normalizePrompt(value) {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
-}
-
-function promptForArgs(args) {
-  return normalizePrompt(argValue(args, "--prompt") || argValue(args, "-p") || argValue(args, "--message"));
-}
-
-function sessionPrompt(meta) {
-  return normalizePrompt(
-    meta?.browser?.preparedSubmission?.prompt ||
-    meta?.options?.preparedSubmission?.prompt ||
-    meta?.options?.prompt ||
-    meta?.promptPreview
-  );
-}
-
-function browserSessionForRun(oracleHome, args, startedAtMs = 0) {
-  const prompt = promptForArgs(args);
-  const promptPrefix = prompt.slice(0, 160);
-  const candidates = listSessionDirs(oracleHome)
+function browserSessions(oracleHome) {
+  return listSessionDirs(oracleHome)
     .map((item) => {
       const meta = readSessionMeta(oracleHome, item.sessionId);
       return meta?.mode === "browser" || meta?.engine === "browser" ? { ...item, meta } : null;
     })
     .filter(Boolean);
-  if (promptPrefix) {
-    const matched = candidates.find((item) => {
-      const createdAt = Date.parse(item.meta?.createdAt ?? "");
-      const freshEnough = !Number.isFinite(createdAt) || !startedAtMs || createdAt >= startedAtMs - 5 * 60 * 1000;
-      return freshEnough && sessionPrompt(item.meta).includes(promptPrefix);
-    });
-    if (matched) return matched;
-  }
-  const afterStart = candidates.find((item) => !startedAtMs || item.mtimeMs >= startedAtMs - 5_000);
-  return afterStart ?? candidates[0] ?? null;
+}
+
+function browserSessionIds(oracleHome) {
+  return new Set(browserSessions(oracleHome).map((item) => item.sessionId));
+}
+
+function browserSessionForRun(oracleHome, args, baselineSessionIds) {
+  return matchNewBrowserSession(browserSessions(oracleHome), args, baselineSessionIds);
 }
 
 function hasSubmittedRuntime(runtime) {
@@ -249,10 +225,15 @@ function readLiveSessionJson(sessionId) {
   }
 }
 
-function verifyBrowserSubmissionAfterFailure(args, startedAtMs) {
+function verifyBrowserSubmissionAfterFailure(args, baselineSessionIds) {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
-  const latest = browserSessionForRun(oracleHome, args, startedAtMs) ?? newestBrowserSession(oracleHome);
-  if (!latest) return { state: "unknown", reason: "no browser session found" };
+  const latest = browserSessionForRun(oracleHome, args, baselineSessionIds);
+  if (!latest) {
+    return {
+      state: "unknown",
+      reason: "no newly-created browser session matched the exact prompt fingerprint; preflight may have failed before session creation",
+    };
+  }
 
   const runtime = latest.meta?.browser?.runtime;
   const liveState = readJson(join(latest.sessionDir, "live-state.json"));
@@ -856,13 +837,14 @@ function runOracleCli(args, extraEnv = {}) {
   });
 }
 
-const runStartedAtMs = Date.now();
+const runOracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+const runBaselineSessionIds = isBrowserRun(cliArgs) ? browserSessionIds(runOracleHome) : null;
 const run = runOracleCli(cliArgs);
 handleSessionRender(cliArgs, run.status);
 
-function handleSuccessfulBrowserRun(args, startedAtMs) {
+function handleSuccessfulBrowserRun(args, baselineSessionIds) {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
-  const session = browserSessionForRun(oracleHome, args, startedAtMs);
+  const session = browserSessionForRun(oracleHome, args, baselineSessionIds);
   if (session?.meta?.status === "completed") {
     if (shouldRejectSuspiciousCompletedAnswer(session.meta, args, session.sessionDir)) {
       console.error(`[oracle-wrapper] completed browser session ${session.sessionId} produced a suspiciously short answer; rendering transcript and failing so callers do not treat it as valid.`);
@@ -890,8 +872,8 @@ function handleSessionRender(args, status) {
   process.exit(3);
 }
 
-function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
-  const verification = verifyBrowserSubmissionAfterFailure(args, startedAtMs);
+function handleFailedBrowserRun(args, baselineSessionIds, allowRetry) {
+  const verification = verifyBrowserSubmissionAfterFailure(args, baselineSessionIds);
   console.error(`[oracle-wrapper] post-failure submission verification: ${JSON.stringify(verification)}`);
   if (verification.state === "completed") {
     console.error("[oracle-wrapper] The matched browser session completed despite the CLI failure. Rendering/recovering the answer now.");
@@ -928,16 +910,17 @@ function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
       if (attachPort) {
         const attachArgs = attachRunningArgs(args, attachPort);
         console.error(`[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once via existing Oracle Chrome DevTools port ${attachPort}.`);
-        const retryStartedAtMs = Date.now();
+        const retryOracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+        const retryBaselineSessionIds = browserSessionIds(retryOracleHome);
         const retry = runOracleCli(attachArgs, {
           ORACLE_SKIP_ATTACH_FALLBACK_RETRY: "1",
           ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1",
         });
         if ((retry.status ?? 1) === 0) {
-          handleSuccessfulBrowserRun(attachArgs, retryStartedAtMs);
+          handleSuccessfulBrowserRun(attachArgs, retryBaselineSessionIds);
           process.exit(0);
         }
-        handleFailedBrowserRun(attachArgs, retryStartedAtMs, false);
+        handleFailedBrowserRun(attachArgs, retryBaselineSessionIds, false);
         process.exit(retry.status ?? 1);
       }
     }
@@ -947,13 +930,14 @@ function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
       !browserConnectionPinned(args)
     ) {
       console.error("[oracle-wrapper] Automatic recovery did not submit the prompt. Retrying once because submission was verified not_submitted.");
-      const retryStartedAtMs = Date.now();
+      const retryOracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+      const retryBaselineSessionIds = browserSessionIds(retryOracleHome);
       const retry = runOracleCli(args, { ORACLE_SKIP_NOT_SUBMITTED_RETRY: "1" });
       if ((retry.status ?? 1) === 0) {
-        handleSuccessfulBrowserRun(args, retryStartedAtMs);
+        handleSuccessfulBrowserRun(args, retryBaselineSessionIds);
         process.exit(0);
       }
-      handleFailedBrowserRun(args, retryStartedAtMs, false);
+      handleFailedBrowserRun(args, retryBaselineSessionIds, false);
       process.exit(retry.status ?? 1);
     }
     console.error("[oracle-wrapper] Automatic recovery did not submit the prompt after the one allowed retry.");
@@ -963,11 +947,11 @@ function handleFailedBrowserRun(args, startedAtMs, allowRetry) {
 }
 
 if (isBrowserRun(cliArgs) && (run.status ?? 0) === 0) {
-  handleSuccessfulBrowserRun(cliArgs, runStartedAtMs);
+  handleSuccessfulBrowserRun(cliArgs, runBaselineSessionIds);
 }
 
 if (isBrowserRun(cliArgs) && (run.status ?? 1) !== 0) {
-  handleFailedBrowserRun(cliArgs, runStartedAtMs, true);
+  handleFailedBrowserRun(cliArgs, runBaselineSessionIds, true);
 }
 
 process.exit(run.status ?? 1);
