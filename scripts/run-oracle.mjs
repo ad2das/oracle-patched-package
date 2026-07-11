@@ -9,6 +9,7 @@ import {
   promptForArgs,
   sessionPrompt,
 } from "./run-oracle-session-match.mjs";
+import { recoverLocalCompletedTranscript } from "./run-oracle-local-transcript.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptDir);
@@ -817,6 +818,10 @@ if (
 }
 cliArgs = maybeAutoAttachBrowserRun(cliArgs);
 
+if (handleLocalCompletedSessionRender(cliArgs)) {
+  process.exit(0);
+}
+
 if (!existsSync(dependencyProbe)) {
   console.error("Installing patched Oracle runtime dependencies...");
   const install = spawnSync(
@@ -870,6 +875,24 @@ function handleSessionRender(args, status) {
   console.error(`[oracle-wrapper] rendered browser session ${sessionId} produced a suspiciously short answer; marking it invalid.`);
   markSuspiciousCompletedAnswer(oracleHome, sessionId, meta, sessionDir);
   process.exit(3);
+}
+
+function handleLocalCompletedSessionRender(args) {
+  if (!isSessionRender(args)) return false;
+  const sessionId = sessionIdForSessionCommand(args);
+  if (!sessionId) return false;
+  const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
+  const recovery = recoverLocalCompletedTranscript({
+    oracleHome,
+    sessionId,
+    isProcessAlive,
+    isPortOpen: isLocalPortOpen,
+  });
+  if (recovery.state !== "recovered" && recovery.state !== "rendered") return false;
+  const action = recovery.state === "recovered" ? "Reconciled completed" : "Rendered verified";
+  console.error(`[oracle-wrapper] ${action} local browser transcript for session ${sessionId}; skipped Chrome reattach.`);
+  process.stdout.write(`${recovery.answer}\n`);
+  return true;
 }
 
 function handleFailedBrowserRun(args, baselineSessionIds, allowRetry) {
