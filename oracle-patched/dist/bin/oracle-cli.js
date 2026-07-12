@@ -205,7 +205,7 @@ program
     .addOption(new Option("--message <text>", "Alias for --prompt.").hideHelp())
     .option("--followup <sessionId|responseId>", "Continue an OpenAI/Azure Responses API run from a stored response id (resp_...) or from a stored oracle session id.")
     .option("--followup-model <model>", "When following up a multi-model session, choose which model response to continue from.")
-    .option("-f, --file <paths...>", "Files/directories or glob patterns to attach (prefix with !pattern to exclude). Oversized files are rejected automatically (default cap: 1 MB; configurable via ORACLE_MAX_FILE_SIZE_BYTES or config.maxFileSizeBytes).", collectPaths, [])
+    .option("-f, --file <paths...>", "Files/directories or glob patterns to attach (prefix with !pattern to exclude). Oversized files are rejected automatically (default cap: 20 MiB; configurable via ORACLE_MAX_FILE_SIZE_BYTES or config.maxFileSizeBytes).", collectPaths, [])
     .option("--max-file-size-bytes <bytes>", "Reject files larger than this many bytes.", parseIntOption)
     .addOption(new Option("--include <paths...>", "Alias for --file.")
     .argParser(collectPaths)

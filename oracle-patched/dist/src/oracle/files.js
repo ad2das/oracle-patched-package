@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
 import { FileValidationError } from "./errors.js";
-export const DEFAULT_MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024; // 1 MB
+export const DEFAULT_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MiB
 const DEFAULT_FS = fs;
 const DEFAULT_IGNORED_DIRS = new Set([
     "node_modules",

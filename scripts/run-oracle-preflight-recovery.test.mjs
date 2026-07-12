@@ -35,7 +35,7 @@ test("oversized-file preflight failure never recovers an older completed session
     writeFileSync(transcript, "# Oracle transcript\n\n## Answer\n\nOLD_SESSION_SENTINEL\n");
 
     const oversizedFile = join(root, "oversized.txt");
-    writeFileSync(oversizedFile, Buffer.alloc(1024 * 1024 + 1, 0x61));
+    writeFileSync(oversizedFile, Buffer.alloc(20 * 1024 * 1024 + 1, 0x61));
     const oldMetaBefore = readFileSync(join(oldSessionDir, "meta.json"), "utf8");
 
     const result = spawnSync(process.execPath, [
