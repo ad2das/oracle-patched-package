@@ -538,7 +538,12 @@ async function markDeadBrowser(meta, { persist }) {
         ? {
             ...meta.response,
             status: "error",
-            incompleteReason: meta.response.incompleteReason ?? "chrome-disconnected",
+            // A previously recovered live conversation can still carry
+            // `live-conversation-recovered` while its Chrome controller dies.
+            // Preserve that value here and attachSession will never enter its
+            // saved-conversation reattach path. The current failure is the
+            // disconnected browser, so record that actionable state.
+            incompleteReason: "chrome-disconnected",
         }
         : { status: "error", incompleteReason: "chrome-disconnected" };
     const updated = {
