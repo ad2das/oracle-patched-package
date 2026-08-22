@@ -2764,8 +2764,14 @@ function isWsl() {
     return os.release().toLowerCase().includes("microsoft");
 }
 function extractConversationIdFromUrl(url) {
-    const match = url.match(/\/c\/([a-zA-Z0-9-]+)/);
-    return match?.[1];
+    const match = url.match(/\/c\/([^/?#]+)/);
+    const id = match?.[1]?.trim();
+    if (!id || id.includes(":"))
+        return undefined;
+    return id;
+}
+export function extractConversationIdFromUrlForTest(url) {
+    return extractConversationIdFromUrl(url);
 }
 async function resolveUserDataBaseDir() {
     // On WSL, Chrome launched via Windows can choke on UNC paths; prefer a Windows-backed temp folder.

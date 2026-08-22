@@ -512,8 +512,9 @@ function buildAssistantSnapshotExpression(minTurnIndex, expectedConversationId) 
     const minTurnLiteral = typeof minTurnIndex === "number" && Number.isFinite(minTurnIndex) && minTurnIndex >= 0
         ? Math.floor(minTurnIndex)
         : -1;
-    const expectedConversationLiteral = typeof expectedConversationId === "string" && expectedConversationId.trim().length > 0
-        ? JSON.stringify(expectedConversationId.trim())
+    const normalizedExpectedConversationId = normalizeExpectedConversationId(expectedConversationId);
+    const expectedConversationLiteral = normalizedExpectedConversationId
+        ? JSON.stringify(normalizedExpectedConversationId)
         : "null";
     return `(() => {
     const MIN_TURN_INDEX = ${minTurnLiteral};
@@ -555,8 +556,9 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
     const minTurnLiteral = typeof minTurnIndex === "number" && Number.isFinite(minTurnIndex) && minTurnIndex >= 0
         ? Math.floor(minTurnIndex)
         : -1;
-    const expectedConversationLiteral = typeof expectedConversationId === "string" && expectedConversationId.trim().length > 0
-        ? JSON.stringify(expectedConversationId.trim())
+    const normalizedExpectedConversationId = normalizeExpectedConversationId(expectedConversationId);
+    const expectedConversationLiteral = normalizedExpectedConversationId
+        ? JSON.stringify(normalizedExpectedConversationId)
         : "null";
     return `(() => {
     ${buildClickDispatcher()}
@@ -810,6 +812,14 @@ function buildResponseObserverExpression(timeoutMs, minTurnIndex, expectedConver
     }
     return captureViaObserver().then((payload) => waitForSettle(payload));
   })()`;
+}
+function normalizeExpectedConversationId(value) {
+    if (typeof value !== "string")
+        return undefined;
+    const normalized = value.trim();
+    if (!normalized || normalized.toLowerCase() === "web" || normalized.includes(":"))
+        return undefined;
+    return normalized;
 }
 function buildAssistantExtractor(functionName) {
     const conversationLiteral = JSON.stringify(CONVERSATION_TURN_SELECTOR);

@@ -39,6 +39,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Browser duplicate-run guard blocks a new browser submission only after a recent session or live recovery check confirms a currently readable ChatGPT tab is still generating.
 - Browser duplicate-run guard ignores stale live-state and log evidence for sessions already marked `completed`, `error`, or `cancelled`.
 - ChatGPT browser capture targets the latest assistant turn after the latest user prompt and waits for real completion controls before saving a transcript.
+- ChatGPT's temporary `/c/WEB:...` post-submit URL is not treated as the final conversation id, so the later UUID conversation answer remains readable by the same session.
 - Attachment upload readiness timeouts are treated as recoverable when file evidence is visible, because ChatGPT may already have accepted the files and started a response even if the CLI readiness check timed out.
 - Live recovery preserves `generating=true` for errored sessions when a real `chatgpt.com/c/...` conversation is still generating, instead of clearing it just because the session metadata says `error`.
 - Browser failures that verify as `not_submitted` automatically run `submit-live-chatgpt.mjs` once against the same session; if this creates a ChatGPT conversation, the wrapper exits successfully and instructs callers to recover that session instead of retrying.

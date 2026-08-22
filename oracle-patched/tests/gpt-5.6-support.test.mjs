@@ -17,6 +17,8 @@ import {
     ensureThinkingTime,
     ensureThinkingTimeIfAvailable,
 } from "../dist/src/browser/actions/thinkingTime.js";
+import { buildAssistantSnapshotExpressionForTest } from "../dist/src/browser/actions/assistantResponse.js";
+import { extractConversationIdFromUrlForTest } from "../dist/src/browser/index.js";
 
 const STANDARD_MODELS = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const PRO_ALIASES = ["gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro"];
@@ -193,5 +195,17 @@ describe("GPT-5.6 CLI aliases", () => {
             }), "pro", logger, "GPT-5.6 Sol"),
             false,
         );
+    });
+
+    test("ignores ChatGPT's temporary WEB conversation id while waiting for the answer", () => {
+        assert.equal(
+            extractConversationIdFromUrlForTest("https://chatgpt.com/c/WEB:9f0874b1-4bc2-4f5b-b154-0cae1fe71242"),
+            undefined,
+        );
+        assert.equal(
+            extractConversationIdFromUrlForTest("https://chatgpt.com/c/6a89218a-7d84-83ee-bfff-32fbaf130030"),
+            "6a89218a-7d84-83ee-bfff-32fbaf130030",
+        );
+        assert.match(buildAssistantSnapshotExpressionForTest(1, "WEB"), /EXPECTED_CONVERSATION_ID = null/);
     });
 });
