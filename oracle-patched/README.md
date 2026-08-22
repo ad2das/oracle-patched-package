@@ -17,7 +17,7 @@ Oracle bundles your prompt and files so another AI can answer with real context.
 
 Browser mode lets you use GPT-5.5 Pro without any API keys — it automates your Chrome browser directly.
 
-When your ChatGPT account exposes GPT-5.6, use `--model gpt-5.6-sol` (or `gpt-5.6-sol-pro` to set the separate `Pro` reasoning effort). The browser picker may expose only the tiers enabled for your account; Oracle reports the visible options instead of substituting another model.
+When your ChatGPT account exposes GPT-5.6, use `--model gpt-5.6-sol` (or `gpt-5.6-sol-pro` to set the separate `Pro` reasoning effort). Browser mode supports the current reasoning slider and legacy menu/radio controls. Pro aliases require a ChatGPT plan/account that exposes `Pro` and submit only after the UI confirms it; otherwise Oracle reports the visible levels instead of substituting a lower effort or another model.
 
 ### First-time login
 

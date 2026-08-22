@@ -12,7 +12,11 @@ import {
     buildModelMatchersLiteralForTest,
     buildModelSelectionExpressionForTest,
 } from "../dist/src/browser/actions/modelSelection.js";
-import { buildThinkingTimeExpressionForTest } from "../dist/src/browser/actions/thinkingTime.js";
+import {
+    buildThinkingTimeExpressionForTest,
+    ensureThinkingTime,
+    ensureThinkingTimeIfAvailable,
+} from "../dist/src/browser/actions/thinkingTime.js";
 
 const STANDARD_MODELS = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const PRO_ALIASES = ["gpt-5.6-sol-pro", "gpt-5.6-terra-pro", "gpt-5.6-luna-pro"];
@@ -135,9 +139,54 @@ describe("GPT-5.6 CLI aliases", () => {
         assert.match(expression, /pro: \['pro'\]/);
         assert.match(expression, /directEffortOption/);
         assert.match(expression, /role=\\"menuitemradio\\"/);
+        assert.match(expression, /\[role="slider"\]/);
+        assert.match(expression, /input\[type="range"\]/);
+        assert.match(expression, /aria-valuetext/);
+        assert.match(expression, /dispatchSliderKey/);
+        assert.match(expression, /'End'/);
+        assert.match(expression, /level-unavailable/);
+        assert.match(expression, /selection-unverified/);
 
         const modelExpression = buildModelSelectionExpressionForTest("GPT-5.6 Sol");
         assert.match(modelExpression, /checkedGpt56ModelLabel/);
         assert.match(modelExpression, /data-has-submenu/);
+    });
+
+    test("accepts verified Pro outcomes and reports unavailable slider levels", async () => {
+        const messages = [];
+        const logger = (message) => messages.push(message);
+        logger.verbose = false;
+        const runtime = (value) => ({
+            evaluate: async () => ({ result: { value } }),
+        });
+
+        await ensureThinkingTime(runtime({ status: "already-selected", label: "Pro" }), "pro", logger, "GPT-5.6 Sol");
+        await ensureThinkingTime(runtime({ status: "switched", label: "Pro" }), "pro", logger, "GPT-5.6 Sol");
+        assert.deepEqual(messages, [
+            "Thinking time: Pro (already selected)",
+            "Thinking time: Pro",
+        ]);
+
+        await assert.rejects(
+            ensureThinkingTime(runtime({
+                status: "level-unavailable",
+                availableLevels: ["Instant", "Medium", "High", "Extra High"],
+            }), "pro", logger, "GPT-5.6 Sol"),
+            /level unavailable.*Available: Instant, Medium, High, Extra High.*confirmed Pro/i,
+        );
+        await assert.rejects(
+            ensureThinkingTime(runtime({
+                status: "selection-unverified",
+                availableLevels: ["Pro"],
+            }), "pro", logger, "GPT-5.6 Sol"),
+            /selection unverified.*confirmed Pro/i,
+        );
+        assert.equal(
+            await ensureThinkingTimeIfAvailable(runtime({
+                status: "control-missing",
+                availableLevels: ["Extra High"],
+            }), "pro", logger, "GPT-5.6 Sol"),
+            false,
+        );
     });
 });

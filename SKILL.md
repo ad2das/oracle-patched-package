@@ -25,6 +25,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 
 - Browser: `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` select their matching visible ChatGPT tiers when the account exposes them.
 - Browser: `gpt-5.6-<tier>-pro` selects the tier and then the separate ChatGPT `Pro` reasoning level. For example, `gpt-5.6-sol-pro` means **GPT-5.6 Sol + Pro effort**, not a nonexistent `GPT-5.6 Sol Pro` model slug.
+- Browser selection supports both the current ARIA reasoning slider and the legacy menu/radio UI. A `*-pro` run requires a ChatGPT plan/account that exposes `Pro` and submits only after the UI confirms it; unavailable accounts fail with the visible reasoning levels instead of falling back.
 - API: the same `*-pro` aliases dispatch the matching API model with `reasoning: { effort: "xhigh", mode: "pro" }`; the actual model IDs remain `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`.
 - Do not silently fall back to GPT-5.5 if a requested GPT-5.6 tier is not visible. Use the picker error's available-options list to choose an exposed tier or ask the user.
 

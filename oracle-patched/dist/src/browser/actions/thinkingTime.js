@@ -26,24 +26,34 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
         case "chip-not-found":
         case "menu-not-found":
         case "option-not-found":
-        case "model-kind-not-found": {
+        case "model-kind-not-found":
+        case "trigger-missing":
+        case "control-missing":
+        case "level-unavailable":
+        case "selection-unverified": {
             await logDomFailure(Runtime, logger, `thinking-${result.status}`);
             const kindHint = result.status === "model-kind-not-found" && result.modelKind
                 ? ` for ${result.modelKind}`
                 : targetModelKind
                     ? ` for ${targetModelKind}`
                     : "";
-            const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel})`;
+            const availableLevels = Array.isArray(result.availableLevels)
+                ? result.availableLevels.filter((value) => typeof value === "string" && value.trim())
+                : [];
+            const availableHint = availableLevels.length > 0
+                ? ` Available: ${availableLevels.join(", ")}.`
+                : "";
+            const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel}).${availableHint}`;
             if (strictProEffort) {
-                throw new Error(`${message}; refusing to submit without confirmed Pro Extended.`);
+                throw new Error(`${message} Refusing to submit without confirmed Pro.`);
             }
-            logger(`${message}; continuing with ChatGPT default.`);
+            logger(`${message} Continuing with ChatGPT default.`);
             return;
         }
         default: {
             await logDomFailure(Runtime, logger, "thinking-time-unknown");
             if (strictProEffort) {
-                throw new Error(`Thinking time: unknown outcome selecting ${capitalizedLevel}; refusing to submit without confirmed Pro Extended.`);
+                throw new Error(`Thinking time: unknown outcome selecting ${capitalizedLevel}; refusing to submit without confirmed Pro.`);
             }
             logger(`Thinking time: unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`);
             return;
@@ -70,8 +80,15 @@ export async function ensureThinkingTimeIfAvailable(Runtime, level, logger, desi
             case "menu-not-found":
             case "option-not-found":
             case "model-kind-not-found":
+            case "trigger-missing":
+            case "control-missing":
+            case "level-unavailable":
+            case "selection-unverified":
                 if (logger.verbose) {
-                    logger(`Thinking time: ${result.status.replaceAll("-", " ")}; continuing with default.`);
+                    const available = Array.isArray(result.availableLevels) && result.availableLevels.length > 0
+                        ? ` Available: ${result.availableLevels.join(", ")}.`
+                        : "";
+                    logger(`Thinking time: ${result.status.replaceAll("-", " ")}.${available} Continuing with default.`);
                 }
                 return false;
             default:
@@ -113,38 +130,153 @@ function buildThinkingTimeExpression(level, desiredModel) {
     const TARGET_LEVEL = ${targetLevelLiteral};
     const TARGET_MODEL_KIND = ${targetModelKindLiteral};
 
-    // Bilingual matchers: English level token + observed Chinese variants.
+    // Current GPT-5.6 labels plus legacy English and observed CJK variants.
     const LEVEL_TOKENS = {
-      light: ['light', '轻'],
-      standard: ['standard', '标准'],
-      extended: ['extended', '扩展', '深度', '加强'],
-      heavy: ['heavy', '重度', '加重', '高'],
+      light: ['light', 'instant', '轻', '즉시'],
+      standard: ['standard', 'medium', '标准', '중간'],
+      extended: ['extended', 'high', '扩展', '深度', '加强', '높음'],
+      heavy: ['heavy', 'extra high', 'extra-high', 'xhigh', '重度', '加重', '매우 높음'],
       pro: ['pro'],
     };
     const targetTokens = LEVEL_TOKENS[TARGET_LEVEL] || [TARGET_LEVEL];
+    const CANONICAL_LEVELS = [
+      { label: 'Instant', tokens: LEVEL_TOKENS.light },
+      { label: 'Medium', tokens: LEVEL_TOKENS.standard },
+      { label: 'High', tokens: LEVEL_TOKENS.extended },
+      { label: 'Extra High', tokens: LEVEL_TOKENS.heavy },
+      { label: 'Pro', tokens: LEVEL_TOKENS.pro },
+    ];
 
     const INITIAL_WAIT_MS = 150;
     const STEP_WAIT_MS = 200;
     const MAX_WAIT_MS = 8000;
 
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    // Keep CJK characters so we can match Chinese labels against LEVEL_TOKENS.
+    // Keep CJK and Hangul characters so localized labels remain matchable.
     const normalize = (value) => (value || '')
       .toLowerCase()
-      .replace(/[^a-z0-9\\u4e00-\\u9fa5]+/g, ' ')
+      .replace(/[^a-z0-9\\u4e00-\\u9fa5\\uac00-\\ud7a3]+/g, ' ')
       .replace(/\\s+/g, ' ')
       .trim();
     const matchesLevel = (text) => {
       const t = normalize(text);
       return targetTokens.some((tok) => t.includes(String(tok).toLowerCase()));
     };
+    const exactlyMatchesLevel = (text) => {
+      const normalized = normalize(text);
+      return targetTokens.some((token) => normalized === normalize(String(token)));
+    };
     const hasToken = (text, token) => normalize(text).split(' ').includes(token);
     const optionIsSelected = (node) => {
       if (!(node instanceof HTMLElement)) return false;
       const ariaChecked = node.getAttribute('aria-checked');
+      const ariaSelected = node.getAttribute('aria-selected');
+      const ariaCurrent = node.getAttribute('aria-current');
       const dataState = (node.getAttribute('data-state') || '').toLowerCase();
-      if (ariaChecked === 'true') return true;
+      if (ariaChecked === 'true' || ariaSelected === 'true' || ariaCurrent === 'true') return true;
       return dataState === 'checked' || dataState === 'selected' || dataState === 'on';
+    };
+    const hasStableBox = (node) => {
+      const rect = node?.getBoundingClientRect?.();
+      return Boolean(
+        rect &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        node.getAttribute?.('aria-hidden') !== 'true'
+      );
+    };
+    const nodeLevelText = (node) => normalize(
+      (node?.getAttribute?.('aria-valuetext') ?? '') + ' ' +
+      (node?.getAttribute?.('aria-label') ?? '') + ' ' +
+      (node?.getAttribute?.('data-value') ?? '') + ' ' +
+      (node?.textContent ?? '')
+    );
+    const canonicalLevelForText = (value) => {
+      const normalized = normalize(value);
+      if (!normalized) return null;
+      for (const entry of CANONICAL_LEVELS) {
+        if (entry.tokens.some((token) => normalized === normalize(String(token)))) {
+          return entry.label;
+        }
+      }
+      return null;
+    };
+    const PICKER_SURFACE_SELECTOR = [
+      MENU_CONTAINER_SELECTOR,
+      '[role="dialog"]',
+      '[role="listbox"]',
+      '[data-radix-popper-content-wrapper]',
+    ].join(', ');
+    const visiblePickerSurfaces = () => Array.from(
+      document.querySelectorAll(PICKER_SURFACE_SELECTOR)
+    ).filter(hasStableBox);
+    const controlledSurface = (trigger) => {
+      const id = trigger?.getAttribute?.('aria-controls');
+      return id ? document.getElementById(id) : null;
+    };
+    const collectAvailableLevels = (surfaces = visiblePickerSurfaces()) => {
+      const labels = [];
+      const seen = new Set();
+      for (const surface of surfaces) {
+        const nodes = [
+          surface,
+          ...Array.from(surface.querySelectorAll(
+            'button, label, span, [role="menuitem"], [role="menuitemradio"], ' +
+            '[role="radio"], [role="option"], [aria-valuetext], [data-value]'
+          )),
+        ];
+        for (const node of nodes) {
+          if (node !== surface && !hasStableBox(node)) continue;
+          const label = canonicalLevelForText(nodeLevelText(node));
+          if (label && !seen.has(label)) {
+            seen.add(label);
+            labels.push(label);
+          }
+        }
+      }
+      return labels;
+    };
+    const failure = (status, surfaces) => ({
+      status,
+      availableLevels: collectAvailableLevels(surfaces),
+    });
+    const selectedLevelSignalMatches = () => {
+      const selected = document.querySelectorAll(
+        '[aria-checked="true"], [aria-selected="true"], [aria-current="true"], ' +
+        '[data-state="checked"], [data-state="selected"], [data-state="on"]'
+      );
+      const signalMatches = (node) => {
+        const text = nodeLevelText(node);
+        return (
+          exactlyMatchesLevel(text) ||
+          (
+            TARGET_LEVEL === 'pro' &&
+            hasToken(text, 'pro') &&
+            !hasToken(text, 'gpt')
+          )
+        );
+      };
+      if (Array.from(selected).some(signalMatches)) {
+        return true;
+      }
+      const composerPills = document.querySelectorAll(
+        '[data-testid="composer-footer-actions"] button, button.__composer-pill'
+      );
+      return Array.from(composerPills).some(signalMatches);
+    };
+    const waitForConfirmedLevel = async (specificNode = null, timeoutMs = 1800) => {
+      const deadline = performance.now() + timeoutMs;
+      while (performance.now() < deadline) {
+        if (
+          (specificNode && optionIsSelected(specificNode) &&
+            exactlyMatchesLevel(nodeLevelText(specificNode))) ||
+          selectedLevelSignalMatches()
+        ) {
+          return true;
+        }
+        await sleep(80);
+      }
+      return false;
     };
     const closeOpenMenus = () => {
       try {
@@ -205,17 +337,20 @@ function buildThinkingTimeExpression(level, desiredModel) {
         const opt = findOptionInMenu(menu);
         if (!opt) {
           closeOpenMenus();
-          return { status: 'option-not-found' };
+          return failure('level-unavailable', [menu]);
         }
         const already = optionIsSelected(opt);
         const label = opt.textContent?.trim?.() || null;
         dispatchClickSequence(opt);
         await sleep(STEP_WAIT_MS);
+        const confirmed = await waitForConfirmedLevel(opt);
         closeOpenMenus();
-        return { status: already ? 'already-selected' : 'switched', label };
+        return confirmed
+          ? { status: already ? 'already-selected' : 'switched', label }
+          : failure('selection-unverified', [menu]);
       }
       closeOpenMenus();
-      return { status: 'menu-not-found' };
+      return failure('control-missing');
     }
 
     // ---------- NEW UI: thinking effort lives inside the model picker ----------
@@ -292,10 +427,6 @@ function buildThinkingTimeExpression(level, desiredModel) {
       }
       return false;
     };
-    const hasStableBox = (node) => {
-      const r = node.getBoundingClientRect?.();
-      return Boolean(r && r.width > 0 && r.height > 0 && node.getAttribute?.('aria-hidden') !== 'true');
-    };
     const pickSingleStableTrailing = (trailings) => {
       const visible = trailings.filter((t) => hasStableBox(t));
       return visible.length === 1 ? visible[0] : null;
@@ -306,7 +437,7 @@ function buildThinkingTimeExpression(level, desiredModel) {
       if (trailings.length === 1) return trailings[0];
       // Prefer the trailing button whose model row is currently selected.
       for (const t of trailings) {
-        const row = findEffortRow(t);
+        const row = rowForTrailing(t) || findEffortRow(t);
         if (rowIsSelected(row)) return t;
       }
       if (TARGET_MODEL_KIND) {
@@ -318,7 +449,7 @@ function buildThinkingTimeExpression(level, desiredModel) {
 
     const modelBtn = findModelButton();
     if (!modelBtn) {
-      return { status: 'chip-not-found' };
+      return failure('trigger-missing');
     }
     // Open model menu (idempotent — leaves it open if already open).
     if (modelBtn.getAttribute('aria-expanded') !== 'true') {
@@ -326,30 +457,231 @@ function buildThinkingTimeExpression(level, desiredModel) {
       await sleep(INITIAL_WAIT_MS);
     }
 
-    // GPT-5.6's simplified picker can expose effort levels (Medium/High/Extra High/Pro)
-    // as direct menu actions rather than a trailing submenu. Prefer an exact visible
-    // direct action when it does not advertise a nested menu.
-    const directEffortOption = findTrailingButtons().find((node) =>
+    const getReasoningSurfaces = () => {
+      const surfaces = visiblePickerSurfaces();
+      const controlled = controlledSurface(modelBtn);
+      if (controlled && !surfaces.includes(controlled)) {
+        surfaces.unshift(controlled);
+      }
+      return surfaces;
+    };
+    const directEffortNodes = () => {
+      const surfaces = getReasoningSurfaces();
+      const selector = [
+        'button',
+        '[role="menuitem"]',
+        '[role="menuitemradio"]',
+        '[role="radio"]',
+        '[role="option"]',
+        '[data-radix-collection-item]',
+      ].join(', ');
+      const nodes = surfaces.flatMap((surface) =>
+        Array.from(surface.querySelectorAll(selector))
+      );
+      return Array.from(new Set(nodes));
+    };
+    const findDirectEffortOption = () => directEffortNodes().find((node) => {
+      if (
+        !hasStableBox(node) ||
+        node.getAttribute('aria-haspopup') === 'menu'
+      ) {
+        return false;
+      }
+      const text = nodeLevelText(node);
+      return (
+        !hasToken(text, 'gpt') &&
+        !hasToken(text, 'sol') &&
+        !hasToken(text, 'terra') &&
+        !hasToken(text, 'luna') &&
+        exactlyMatchesLevel(text)
+      );
+    }) || findTrailingButtons().find((node) =>
       hasStableBox(node) &&
       node.getAttribute('aria-haspopup') !== 'menu' &&
-      matchesLevel(rowTextForTrailing(node))
-    ) || Array.from(document.querySelectorAll('[role="menuitemradio"]')).find((node) => {
-      if (!hasStableBox(node)) return false;
-      const text = normalize(node.textContent ?? '');
-      // GPT-5.6 exposes Medium/High/Extra High/Pro as ordinary radio rows in
-      // the Intelligence picker, without the older trailing-action attribute.
-      // Exclude model rows that happen to contain a level token in their name.
-      return !text.includes('gpt') && matchesLevel(text);
-    });
+      exactlyMatchesLevel(rowTextForTrailing(node))
+    );
+
+    // GPT-5.6's August 2026 UI exposes reasoning as a real slider. Scope
+    // discovery to the open model picker so unrelated page sliders cannot be
+    // mistaken for an intelligence control.
+    const SLIDER_SELECTOR = '[role="slider"], input[type="range"]';
+    const findReasoningSlider = () => {
+      const surfaces = getReasoningSurfaces();
+      const scoped = surfaces.flatMap((surface) =>
+        Array.from(surface.querySelectorAll(SLIDER_SELECTOR))
+      ).filter(hasStableBox);
+      if (scoped.length === 1) return { slider: scoped[0], surfaces };
+      const labelled = scoped.find((slider) => {
+        const label = normalize(
+          (slider.getAttribute('aria-label') ?? '') + ' ' +
+          (slider.getAttribute('data-testid') ?? '')
+        );
+        return (
+          label.includes('reasoning') ||
+          label.includes('intelligence') ||
+          label.includes('thinking')
+        );
+      });
+      return labelled ? { slider: labelled, surfaces } : null;
+    };
+    const sliderValueMatchesTarget = (slider) => {
+      const valueText = slider?.getAttribute?.('aria-valuetext') ?? '';
+      if (
+        exactlyMatchesLevel(valueText) ||
+        (
+          TARGET_LEVEL === 'pro' &&
+          hasToken(valueText, 'pro') &&
+          !hasToken(valueText, 'gpt')
+        )
+      ) {
+        return true;
+      }
+      if (TARGET_LEVEL !== 'pro') return false;
+      const valueNow = Number(slider?.getAttribute?.('aria-valuenow'));
+      const valueMax = Number(slider?.getAttribute?.('aria-valuemax'));
+      return (
+        Number.isFinite(valueNow) &&
+        Number.isFinite(valueMax) &&
+        valueNow === valueMax &&
+        selectedLevelSignalMatches()
+      );
+    };
+    const dispatchSliderKey = (slider, key) => {
+      try {
+        slider.focus?.();
+        const common = {
+          key,
+          code: key,
+          bubbles: true,
+          cancelable: true,
+        };
+        slider.dispatchEvent(new KeyboardEvent('keydown', common));
+        slider.dispatchEvent(new KeyboardEvent('keyup', common));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const setNativeRangeToTarget = (slider) => {
+      if (
+        typeof HTMLInputElement === 'undefined' ||
+        !(slider instanceof HTMLInputElement) ||
+        slider.type !== 'range'
+      ) {
+        return false;
+      }
+      const minimum = Number(slider.min || slider.getAttribute('aria-valuemin') || 0);
+      const maximum = Number(slider.max || slider.getAttribute('aria-valuemax'));
+      const step = Number(slider.step || 1);
+      const targetIndex = {
+        light: 0,
+        standard: 1,
+        extended: 2,
+        heavy: 3,
+        pro: 4,
+      }[TARGET_LEVEL];
+      if (
+        !Number.isFinite(minimum) ||
+        !Number.isFinite(maximum) ||
+        !Number.isFinite(step) ||
+        targetIndex == null
+      ) {
+        return false;
+      }
+      const targetValue = TARGET_LEVEL === 'pro'
+        ? maximum
+        : Math.min(maximum, minimum + step * targetIndex);
+      try {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value'
+        )?.set;
+        if (setter) setter.call(slider, String(targetValue));
+        else slider.value = String(targetValue);
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+        slider.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const waitForSliderConfirmation = async (slider, timeoutMs = 2200) => {
+      const deadline = performance.now() + timeoutMs;
+      while (performance.now() < deadline) {
+        if (sliderValueMatchesTarget(slider) || selectedLevelSignalMatches()) {
+          return true;
+        }
+        await sleep(80);
+      }
+      return false;
+    };
+
+    // Prefer a semantic exact-level action when the slider renders clickable
+    // ticks/radio rows. This also preserves the immediately preceding UI.
+    const directEffortOption = findDirectEffortOption();
     if (directEffortOption) {
+      const directSurfaces = getReasoningSurfaces();
       const row = rowForTrailing(directEffortOption) || findEffortRow(directEffortOption);
       const already = optionIsSelected(directEffortOption) || rowIsSelected(row);
       const label = directEffortOption.textContent?.trim?.() || row?.textContent?.trim?.() || null;
+      if (already) {
+        closeOpenMenus();
+        return { status: 'already-selected', label };
+      }
       dispatchClickSequence(directEffortOption);
-      await sleep(STEP_WAIT_MS);
+      const confirmed = await waitForConfirmedLevel(directEffortOption);
       closeOpenMenus();
-      const confirmed = optionIsSelected(directEffortOption) || rowIsSelected(row);
-      return { status: confirmed ? (already ? 'already-selected' : 'switched') : 'selection-unverified', label };
+      return confirmed
+        ? { status: 'switched', label }
+        : failure('selection-unverified', directSurfaces);
+    }
+
+    const sliderMatch = findReasoningSlider();
+    if (sliderMatch) {
+      const { slider, surfaces } = sliderMatch;
+      const availableLevels = collectAvailableLevels(surfaces);
+      const targetAvailable = availableLevels.some((label) =>
+        exactlyMatchesLevel(label)
+      );
+      if (sliderValueMatchesTarget(slider)) {
+        closeOpenMenus();
+        return {
+          status: 'already-selected',
+          label: slider.getAttribute('aria-valuetext') || 'Pro',
+        };
+      }
+      // Never press End on a slider whose maximum may only be Extra High.
+      if (!targetAvailable) {
+        closeOpenMenus();
+        return { status: 'level-unavailable', availableLevels };
+      }
+      const attempted =
+        setNativeRangeToTarget(slider) ||
+        dispatchSliderKey(slider, TARGET_LEVEL === 'pro' ? 'End' : 'Home');
+      const nativeRange =
+        typeof HTMLInputElement !== 'undefined' &&
+        slider instanceof HTMLInputElement;
+      if (attempted && TARGET_LEVEL !== 'pro' && !nativeRange) {
+        const targetIndex = {
+          light: 0,
+          standard: 1,
+          extended: 2,
+          heavy: 3,
+        }[TARGET_LEVEL] ?? 0;
+        for (let index = 0; index < targetIndex; index += 1) {
+          dispatchSliderKey(slider, 'ArrowRight');
+        }
+      }
+      if (!attempted) {
+        closeOpenMenus();
+        return failure('selection-unverified', surfaces);
+      }
+      const confirmed = await waitForSliderConfirmation(slider);
+      const label = slider.getAttribute('aria-valuetext') || 'Pro';
+      closeOpenMenus();
+      return confirmed
+        ? { status: 'switched', label }
+        : failure('selection-unverified', surfaces);
     }
 
     let trailing = null;
@@ -360,12 +692,17 @@ function buildThinkingTimeExpression(level, desiredModel) {
       await sleep(100);
     }
     if (!trailing) {
+      const surfaces = getReasoningSurfaces();
       closeOpenMenus();
-      return { status: 'chip-not-found' };
+      return failure('control-missing', surfaces);
     }
     if (trailing.kindNotFound) {
+      const surfaces = getReasoningSurfaces();
       closeOpenMenus();
-      return { status: 'model-kind-not-found', modelKind: TARGET_MODEL_KIND };
+      return {
+        ...failure('control-missing', surfaces),
+        modelKind: TARGET_MODEL_KIND,
+      };
     }
 
     dispatchClickSequence(trailing);
@@ -401,22 +738,29 @@ function buildThinkingTimeExpression(level, desiredModel) {
       await sleep(100);
     }
     if (!effortMenu) {
+      const surfaces = getReasoningSurfaces();
       closeOpenMenus();
-      return { status: 'menu-not-found' };
+      return failure('control-missing', surfaces);
     }
 
     const targetOption = findOptionInMenu(effortMenu);
     if (!targetOption) {
       closeOpenMenus();
-      return { status: 'option-not-found' };
+      return failure('level-unavailable', [effortMenu]);
     }
 
     const already = optionIsSelected(targetOption);
     const label = targetOption.textContent?.trim?.() || null;
+    if (already) {
+      closeOpenMenus();
+      return { status: 'already-selected', label };
+    }
     dispatchClickSequence(targetOption);
-    await sleep(STEP_WAIT_MS);
+    const confirmed = await waitForConfirmedLevel(targetOption);
     closeOpenMenus();
-    return { status: already ? 'already-selected' : 'switched', label };
+    return confirmed
+      ? { status: 'switched', label }
+      : failure('selection-unverified', [effortMenu]);
   })()`;
 }
 export function buildThinkingTimeExpressionForTest(level = "extended", desiredModel) {

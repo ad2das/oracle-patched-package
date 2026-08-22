@@ -50,7 +50,7 @@ function buildBrowserRunWarnings(args) {
         {
             code: "browser-pro-fast-large-run",
             severity: "warning",
-            message: `Large browser Pro run completed quickly (${(args.elapsedMs / 1000).toFixed(0)}s for ~${args.inputTokens.toLocaleString()} input tokens); verify the stored model selection evidence before claiming Pro Extended output.`,
+            message: `Large browser Pro run completed quickly (${(args.elapsedMs / 1000).toFixed(0)}s for ~${args.inputTokens.toLocaleString()} input tokens); verify the stored model selection evidence before claiming Pro output.`,
             details: {
                 inputTokens: args.inputTokens,
                 elapsedMs: args.elapsedMs,
