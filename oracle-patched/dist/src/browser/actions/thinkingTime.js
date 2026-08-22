@@ -43,7 +43,10 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
             const availableHint = availableLevels.length > 0
                 ? ` Available: ${availableLevels.join(", ")}.`
                 : "";
-            const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel}).${availableHint}`;
+            const controlsHint = logger.verbose && Array.isArray(result.controls) && result.controls.length > 0
+                ? ` Controls: ${JSON.stringify(result.controls)}.`
+                : "";
+            const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel}).${availableHint}${controlsHint}`;
             if (strictProEffort) {
                 throw new Error(`${message} Refusing to submit without confirmed Pro.`);
             }
@@ -236,10 +239,32 @@ function buildThinkingTimeExpression(level, desiredModel) {
       }
       return labels;
     };
-    const failure = (status, surfaces) => ({
-      status,
-      availableLevels: collectAvailableLevels(surfaces),
-    });
+    const collectControlDiagnostics = (surfaces = visiblePickerSurfaces()) => {
+      const nodes = surfaces.flatMap((surface) => Array.from(surface.querySelectorAll(
+        'button, input, [role], [aria-label], [aria-valuetext], [data-testid]'
+      )));
+      return Array.from(new Set(nodes)).filter(hasStableBox).map((node) => ({
+        tag: node.tagName?.toLowerCase?.() || '',
+        role: node.getAttribute?.('role') || '',
+        text: (node.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+        label: node.getAttribute?.('aria-label') || '',
+        haspopup: node.getAttribute?.('aria-haspopup') || '',
+        expanded: node.getAttribute?.('aria-expanded') || '',
+        checked: node.getAttribute?.('aria-checked') || node.getAttribute?.('aria-selected') || '',
+        valueText: node.getAttribute?.('aria-valuetext') || '',
+        testid: node.getAttribute?.('data-testid') || '',
+      })).filter((entry) =>
+        entry.text || entry.label || entry.valueText || entry.testid
+      ).slice(0, 30);
+    };
+    const failure = (status, surfaces) => {
+      const resolvedSurfaces = surfaces || visiblePickerSurfaces();
+      return {
+        status,
+        availableLevels: collectAvailableLevels(resolvedSurfaces),
+        controls: collectControlDiagnostics(resolvedSurfaces),
+      };
+    };
     const selectedLevelSignalMatches = () => {
       const selected = document.querySelectorAll(
         '[aria-checked="true"], [aria-selected="true"], [aria-current="true"], ' +
@@ -504,12 +529,21 @@ function buildThinkingTimeExpression(level, desiredModel) {
     // GPT-5.6's August 2026 UI exposes reasoning as a real slider. Scope
     // discovery to the open model picker so unrelated page sliders cannot be
     // mistaken for an intelligence control.
-    const SLIDER_SELECTOR = '[role="slider"], input[type="range"]';
+    const SLIDER_SELECTOR = [
+      '[role="slider"]',
+      'input[type="range"]',
+      '[data-testid="composer-model-picker-slider-simple-view"] [aria-label="Power" i]',
+    ].join(', ');
     const findReasoningSlider = () => {
       const surfaces = getReasoningSurfaces();
-      const scoped = surfaces.flatMap((surface) =>
+      const scoped = Array.from(new Set(surfaces.flatMap((surface) =>
         Array.from(surface.querySelectorAll(SLIDER_SELECTOR))
-      ).filter(hasStableBox);
+      ))).filter(hasStableBox);
+      const powerControl = scoped.find((slider) =>
+        normalize(slider.getAttribute('aria-label') ?? '') === 'power' &&
+        Boolean(slider.closest('[data-testid="composer-model-picker-slider-simple-view"]'))
+      );
+      if (powerControl) return { slider: powerControl, surfaces };
       if (scoped.length === 1) return { slider: scoped[0], surfaces };
       const labelled = scoped.find((slider) => {
         const label = normalize(
@@ -524,8 +558,17 @@ function buildThinkingTimeExpression(level, desiredModel) {
       });
       return labelled ? { slider: labelled, surfaces } : null;
     };
+    const sliderValueText = (slider) => {
+      const explicit = slider?.getAttribute?.('aria-valuetext') ?? '';
+      const simpleView = slider?.closest?.(
+        '[data-testid="composer-model-picker-slider-simple-view"]'
+      );
+      return normalize(explicit + ' ' + (simpleView?.textContent ?? ''));
+    };
+    const sliderHasFivePositions = (slider) =>
+      /(?:^|\\s)[1-5]\\s+of\\s+5(?:\\s|$)/.test(sliderValueText(slider));
     const sliderValueMatchesTarget = (slider) => {
-      const valueText = slider?.getAttribute?.('aria-valuetext') ?? '';
+      const valueText = sliderValueText(slider);
       if (
         exactlyMatchesLevel(valueText) ||
         (
@@ -616,38 +659,38 @@ function buildThinkingTimeExpression(level, desiredModel) {
       return false;
     };
 
-    // Prefer a semantic exact-level action when the slider renders clickable
-    // ticks/radio rows. This also preserves the immediately preceding UI.
-    const directEffortOption = findDirectEffortOption();
-    if (directEffortOption) {
+    const selectDirectEffort = async () => {
+      const option = findDirectEffortOption();
+      if (!option) return null;
       const directSurfaces = getReasoningSurfaces();
-      const row = rowForTrailing(directEffortOption) || findEffortRow(directEffortOption);
-      const already = optionIsSelected(directEffortOption) || rowIsSelected(row);
-      const label = directEffortOption.textContent?.trim?.() || row?.textContent?.trim?.() || null;
+      const row = rowForTrailing(option) || findEffortRow(option);
+      const already = optionIsSelected(option) || rowIsSelected(row);
+      const label = option.textContent?.trim?.() || row?.textContent?.trim?.() || null;
       if (already) {
         closeOpenMenus();
         return { status: 'already-selected', label };
       }
-      dispatchClickSequence(directEffortOption);
-      const confirmed = await waitForConfirmedLevel(directEffortOption);
+      dispatchClickSequence(option);
+      const confirmed = await waitForConfirmedLevel(option);
       closeOpenMenus();
       return confirmed
         ? { status: 'switched', label }
         : failure('selection-unverified', directSurfaces);
-    }
+    };
 
-    const sliderMatch = findReasoningSlider();
-    if (sliderMatch) {
-      const { slider, surfaces } = sliderMatch;
+    const selectSliderEffort = async () => {
+      const match = findReasoningSlider();
+      if (!match) return null;
+      const { slider, surfaces } = match;
       const availableLevels = collectAvailableLevels(surfaces);
-      const targetAvailable = availableLevels.some((label) =>
-        exactlyMatchesLevel(label)
-      );
+      const targetAvailable =
+        availableLevels.some((label) => exactlyMatchesLevel(label)) ||
+        (TARGET_LEVEL === 'pro' && sliderHasFivePositions(slider));
       if (sliderValueMatchesTarget(slider)) {
         closeOpenMenus();
         return {
           status: 'already-selected',
-          label: slider.getAttribute('aria-valuetext') || 'Pro',
+          label: TARGET_LEVEL === 'pro' ? 'Pro' : sliderValueText(slider),
         };
       }
       // Never press End on a slider whose maximum may only be Extra High.
@@ -655,9 +698,17 @@ function buildThinkingTimeExpression(level, desiredModel) {
         closeOpenMenus();
         return { status: 'level-unavailable', availableLevels };
       }
+      const isPowerControl =
+        normalize(slider.getAttribute?.('aria-label') ?? '') === 'power' &&
+        sliderHasFivePositions(slider);
       const attempted =
         setNativeRangeToTarget(slider) ||
-        dispatchSliderKey(slider, TARGET_LEVEL === 'pro' ? 'End' : 'Home');
+        dispatchSliderKey(
+          slider,
+          TARGET_LEVEL === 'pro'
+            ? (isPowerControl ? 'ArrowRight' : 'End')
+            : 'Home'
+        );
       const nativeRange =
         typeof HTMLInputElement !== 'undefined' &&
         slider instanceof HTMLInputElement;
@@ -677,11 +728,46 @@ function buildThinkingTimeExpression(level, desiredModel) {
         return failure('selection-unverified', surfaces);
       }
       const confirmed = await waitForSliderConfirmation(slider);
-      const label = slider.getAttribute('aria-valuetext') || 'Pro';
+      const label = TARGET_LEVEL === 'pro' ? 'Pro' : sliderValueText(slider);
       closeOpenMenus();
       return confirmed
         ? { status: 'switched', label }
         : failure('selection-unverified', surfaces);
+    };
+
+    // Some picker revisions expose only the current value (for example
+    // "Extra High") as a button. Activating it reveals the real range/ticks.
+    const findCollapsedReasoningTrigger = () => {
+      const candidates = [];
+      for (const surface of getReasoningSurfaces()) {
+        for (const node of surface.querySelectorAll('button, [role="button"], [aria-haspopup]')) {
+          if (!hasStableBox(node)) continue;
+          const levelLabel = canonicalLevelForText(nodeLevelText(node));
+          if (!levelLabel || exactlyMatchesLevel(levelLabel)) continue;
+          candidates.push(node);
+        }
+      }
+      const selected = candidates.find((node) =>
+        optionIsSelected(node) || rowIsSelected(rowForTrailing(node) || findEffortRow(node))
+      );
+      return selected || (candidates.length === 1 ? candidates[0] : null);
+    };
+
+    // Prefer a semantic exact-level action when the slider renders clickable
+    // ticks/radio rows. This also preserves the immediately preceding UI.
+    const directResult = await selectDirectEffort();
+    if (directResult) return directResult;
+    const sliderResult = await selectSliderEffort();
+    if (sliderResult) return sliderResult;
+
+    const collapsedTrigger = findCollapsedReasoningTrigger();
+    if (collapsedTrigger) {
+      dispatchClickSequence(collapsedTrigger);
+      await sleep(STEP_WAIT_MS);
+      const expandedDirectResult = await selectDirectEffort();
+      if (expandedDirectResult) return expandedDirectResult;
+      const expandedSliderResult = await selectSliderEffort();
+      if (expandedSliderResult) return expandedSliderResult;
     }
 
     let trailing = null;

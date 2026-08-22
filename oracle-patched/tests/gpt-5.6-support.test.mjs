@@ -137,13 +137,18 @@ describe("GPT-5.6 CLI aliases", () => {
 
         const expression = buildThinkingTimeExpressionForTest("pro", "GPT-5.6 Sol");
         assert.match(expression, /pro: \['pro'\]/);
-        assert.match(expression, /directEffortOption/);
+        assert.match(expression, /selectDirectEffort/);
         assert.match(expression, /role=\\"menuitemradio\\"/);
         assert.match(expression, /\[role="slider"\]/);
         assert.match(expression, /input\[type="range"\]/);
+        assert.match(expression, /composer-model-picker-slider-simple-view/);
+        assert.match(expression, /aria-label="Power" i/);
+        assert.match(expression, /sliderHasFivePositions/);
+        assert.match(expression, /isPowerControl \? 'ArrowRight' : 'End'/);
         assert.match(expression, /aria-valuetext/);
         assert.match(expression, /dispatchSliderKey/);
         assert.match(expression, /'End'/);
+        assert.match(expression, /findCollapsedReasoningTrigger/);
         assert.match(expression, /level-unavailable/);
         assert.match(expression, /selection-unverified/);
 

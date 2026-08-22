@@ -10,7 +10,7 @@ Changes made:
 - ChatGPT model selection accepts current visible labels such as `Instant`, `Thinking Heavy`, and `Thinking Extended` for GPT-5.2 browser runs.
 - GPT-5.6 model support covers Sol, Terra, and Luna; `gpt-5.6-<tier>-pro` selects the visible tier plus the separate ChatGPT `Pro` reasoning level in browser mode, or API `reasoning.mode: "pro"` in API mode.
 - GPT-5.6 browser support selects Sol, Terra, or Luna, and maps `gpt-5.6-<tier>-pro` to the matching tier plus the separate ChatGPT `Pro` reasoning level. API runs map those aliases to `reasoning.mode: "pro"`.
-- The browser path supports ChatGPT's current reasoning slider and legacy menu/radio controls. Pro aliases require a ChatGPT plan/account that exposes `Pro`, fail closed unless the selected state is verified, and report the available levels.
+- The browser path supports ChatGPT's current five-position `Power` control, ARIA/range sliders, and legacy menu/radio controls. Pro aliases fail closed unless the selected state is verified, and report diagnostics without adding work to the successful path.
 - `read-live-chatgpt.mjs` records live ChatGPT state, and `run-oracle.mjs` blocks accidental duplicate browser submissions only when a current live read confirms ChatGPT is still generating.
 - The wrapper ignores stale, unrelated, terminal, or unreadable live-state/session-log evidence instead of blocking new browser submissions on old `generating=true` records.
 - When a browser run fails and live verification proves the prompt was not submitted, the wrapper automatically invokes `submit-live-chatgpt.mjs` once on the same session. If that recovery creates a ChatGPT conversation URL, the wrapper exits successfully so callers recover that session instead of starting a duplicate.
