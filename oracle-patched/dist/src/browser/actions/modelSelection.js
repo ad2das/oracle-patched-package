@@ -1,9 +1,13 @@
 import { COMPOSER_MODEL_SIGNAL_SELECTOR, MENU_CONTAINER_SELECTOR, MENU_ITEM_SELECTOR, MODEL_BUTTON_SELECTOR, } from "../constants.js";
 import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
+import { buildGpt6ModelSelectionExpression, isGpt6ModelLabel } from "./gpt6ModelSelection.js";
 const LEGACY_PRO_VERSION_WORD_TOKENS = ["5 4", "5 2", "5 1", "5 0", "gpt 5 pro"];
 const LEGACY_PRO_VERSION_COMPACT_TOKENS = ["gpt54", "gpt52", "gpt51", "gpt50"];
 export async function ensureModelSelection(Runtime, desiredModel, logger, strategy = "select") {
+    if (isGpt6ModelLabel(desiredModel) && strategy === "current") {
+        throw new Error("GPT-6 requires verified model selection; refusing the current-model bypass.");
+    }
     const outcome = await Runtime.evaluate({
         expression: buildModelSelectionExpression(desiredModel, strategy),
         awaitPromise: true,
@@ -14,7 +18,7 @@ export async function ensureModelSelection(Runtime, desiredModel, logger, strate
         case "already-selected":
         case "switched":
         case "switched-best-effort": {
-            const label = result.label ?? desiredModel;
+            const label = result.label ?? (isGpt6ModelLabel(desiredModel) ? "" : desiredModel);
             if (strategy !== "current") {
                 assertResolvedModelSelection(desiredModel, label);
             }
@@ -46,6 +50,12 @@ export async function ensureModelSelection(Runtime, desiredModel, logger, strate
     }
 }
 function assertResolvedModelSelection(desiredModel, resolvedLabel) {
+    if (isGpt6ModelLabel(desiredModel)) {
+        if (!isGpt6ModelLabel(resolvedLabel)) {
+            throw new Error('Model picker selected "' + resolvedLabel + '" while "' + desiredModel + '" requires verified GPT-6 Astra.');
+        }
+        return;
+    }
     const desired = desiredModel.toLowerCase();
     const resolved = resolvedLabel.toLowerCase();
     const normalizedDesired = normalizeResolvedModelLabel(desired);
@@ -101,6 +111,9 @@ export function assertResolvedModelSelectionForTest(desiredModel, resolvedLabel)
  * The string is evaluated inside Chrome, so keep it self-contained and well-commented.
  */
 function buildModelSelectionExpression(targetModel, strategy) {
+    if (isGpt6ModelLabel(targetModel)) {
+        return buildGpt6ModelSelectionExpression();
+    }
     const matchers = buildModelMatchersLiteral(targetModel);
     const composerSignalMatchers = buildComposerSignalMatchers(targetModel);
     const labelLiteral = JSON.stringify(matchers.labelTokens);

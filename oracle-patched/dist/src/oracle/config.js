@@ -4,8 +4,9 @@ const require = createRequire(import.meta.url);
 let countTokensGpt5Impl;
 let countTokensGpt5ProImpl;
 let countTokensAnthropicImpl;
-export const DEFAULT_MODEL = "gpt-5.5-pro";
+export const DEFAULT_MODEL = "gpt-6-astra-pro";
 export const PRO_MODELS = new Set([
+    "gpt-6-astra-pro",
     "gpt-5.6-sol-pro",
     "gpt-5.6-terra-pro",
     "gpt-5.6-luna-pro",
@@ -30,6 +31,29 @@ const countTokensAnthropic = (input) => {
     return countTokensAnthropicImpl(stringifyTokenizerInput(input));
 };
 export const MODEL_CONFIGS = {
+    "gpt-6-astra": {
+        model: "gpt-6-astra",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 922_000,
+        pricing: {
+            inputPerToken: 10 / 1_000_000,
+            outputPerToken: 50 / 1_000_000,
+        },
+        reasoning: { effort: "medium" },
+    },
+    "gpt-6-astra-pro": {
+        model: "gpt-6-astra-pro",
+        apiModel: "gpt-6-astra",
+        provider: "openai",
+        tokenizer: countTokensGpt5,
+        inputLimit: 922_000,
+        pricing: {
+            inputPerToken: 10 / 1_000_000,
+            outputPerToken: 50 / 1_000_000,
+        },
+        reasoning: { effort: "max", mode: "pro" },
+    },
     "gpt-5.6": {
         model: "gpt-5.6",
         apiModel: "gpt-5.6-sol",

@@ -2,6 +2,20 @@
 
 This repository contains a patched copy of `@steipete/oracle` 0.12.1 under `oracle-patched/`.
 
+## GPT-6 Astra Pro
+
+The default target is `gpt-6-astra-pro`. `gpt-6-pro` and `GPT6 Pro` are equivalent aliases. Browser mode verifies the GPT-6 model badge and the separate Pro reasoning level before sending; it never treats a bare Pro or Latest label as model proof. English Power and Korean 성능 sliders are supported from every lower position.
+
+```powershell
+node scripts/run-oracle.mjs --engine browser --model gpt-6-pro -p "Review this implementation" --file "src/**"
+```
+
+API mode sends `model: "gpt-6-astra"` and `reasoning: { effort: "max", mode: "pro" }`; it requires separate API access and billing. Token estimates use short-context rates and do not predict total aggregate Pro work or long-context surcharges.
+
+Pro aliases reject lower effort overrides. GPT-6 rejects the unverified `current` model strategy. Live-submit recovery repeats model and Pro verification before touching the composer.
+
+Focused regression tests: `npm --prefix oracle-patched run test:gpt-6`.
+
 Changes made:
 
 - ChatGPT browser submissions with uploaded attachments use Enter instead of clicking the Send button.
@@ -26,6 +40,9 @@ Recovery policy:
 
 Validation performed:
 
+- On 2026-09-05, a real `gpt-6-pro` browser run verified `6Pro` plus the separate Pro level and returned `ORACLE_GPT6_PRO_OK_20260905`.
+- A second real run omitted `--model` to verify the GPT-6 Pro default, uploaded `oracle-patched/tests/fixtures/gpt6-pro-smoke.txt`, and returned `ORACLE_GPT6_PRO_UPLOAD_OK 87`. Both runs saved completed local transcript artifacts.
+- All 58 regression tests passed with `node --test oracle-patched/tests/*.test.mjs scripts/*.test.mjs`, including model mismatch rejection, localized slider transitions from every lower level, and strict recovery checks. API request construction is unit-tested; live API billing was not exercised.
 - Imported the patched `promptComposer.js` and `modelSelection.js` modules successfully with Node.
 - Ran Oracle browser mode with `--browser-attachments always` against `gpt-5.2-instant`.
 - Confirmed real uploaded attachment flow completed with answer `UPLOAD_OK`.

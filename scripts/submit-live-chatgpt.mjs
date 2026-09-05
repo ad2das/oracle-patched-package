@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyRecoveryModel } from "./verify-browser-model.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(path.join(scriptDir, "..", "oracle-patched", "package.json"));
@@ -314,6 +315,13 @@ const result = await withCdp(tab.webSocketDebuggerUrl, async (send) => {
       };
     }
   }
+  await verifyRecoveryModel({
+    evaluate: async (parameters) => {
+      const response = await send("Runtime.evaluate", parameters);
+      if (response.error) throw new Error(response.error.message);
+      return response.result;
+    },
+  }, meta, (message) => console.error("[oracle-recovery] " + message));
   const prepared = await send("Runtime.evaluate", {
     expression: prepareComposerExpression(),
     returnByValue: true,

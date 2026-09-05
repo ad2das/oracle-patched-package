@@ -99,6 +99,9 @@ export function toTransportError(error, model) {
             messageText.includes("does not exist") ||
             messageText.includes("unknown model") ||
             messageText.includes("model_not_found");
+        if (model.startsWith("gpt-6") && modelUnavailable) {
+            return new OracleTransportError("model-unavailable", model + " is not available for this API organization. Confirm GPT-6 Astra API access, or use browser mode with a signed-in ChatGPT account exposing GPT-6 and Pro. No older model was substituted.", apiError);
+        }
         if (model.startsWith("gpt-5.6") && modelUnavailable) {
             return new OracleTransportError("model-unavailable", `${model} is not available for this API organization. GPT-5.6 API preview access must be explicitly provisioned; confirm the approved organization or use gpt-5.5. Browser mode can use GPT-5.6 when the tier is visible in the signed-in ChatGPT account.`, apiError);
         }

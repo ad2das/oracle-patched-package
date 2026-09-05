@@ -1,6 +1,6 @@
 ---
 name: oracle
-description: "Oracle second-model review using a bundled patched @steipete/oracle CLI. Use when Codex needs another model for code review, debugging, refactor advice, design checks, or large file-context analysis, including GPT-5.6 Sol/Terra/Luna in ChatGPT browser mode or the Responses API."
+description: "Oracle second-model review using a bundled patched @steipete/oracle CLI. Use for code review, debugging, refactor advice, design checks, or file-context analysis with GPT-6 Astra Pro by default, including explicit GPT6 Pro requests. Also supports GPT-5.6 tiers in ChatGPT browser mode or the Responses API."
 ---
 
 # Oracle Patched
@@ -10,16 +10,26 @@ Use this skill for Oracle second-model review with the bundled patched CLI in th
 Always invoke Oracle through the wrapper script relative to this `SKILL.md`:
 
 ```powershell
-node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro -p "<task>" --file "src/**"
+node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-6-astra-pro -p "<task>" --file "src/**"
 ```
 
 On non-Windows shells, use the same script with forward slashes:
 
 ```bash
-node "<skill-folder>/scripts/run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro -p "<task>" --file "src/**"
+node "<skill-folder>/scripts/run-oracle.mjs" --engine browser --model gpt-6-astra-pro -p "<task>" --file "src/**"
 ```
 
 Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patched `oracle-patched/dist/bin/oracle-cli.js` bundled with this repo and installs runtime dependencies on first use if needed.
+
+## GPT-6 Pro Model Selection
+
+- Default: `gpt-6-astra-pro`. `gpt-6-pro`, `GPT6 Pro`, and `GPT-6 Astra Pro` resolve to the same target, never GPT-5.5 Pro.
+- Browser: select GPT-6, then separately confirm the `Pro` reasoning level before submitting. A numeric `6` badge such as `6 Pro` is accepted as model evidence; bare `Pro` is not.
+- The current picker can call GPT-6 `Latest` / `최신`. That row is only a navigation candidate: require the resulting GPT-6 badge. If Latest changes to a different generation, fail instead of silently following it.
+- English `Power` and Korean `성능` sliders are supported. Advance through the known five-position control until the UI explicitly confirms Pro; a locked slider or a highest level other than Pro fails closed.
+- Do not use `--browser-model-strategy current` or override a Pro alias with a lower `--browser-thinking-time`. Recovery submissions recheck both the requested model and Pro.
+- API: dispatch `gpt-6-astra` with `reasoning: { effort: "max", mode: "pro" }`. Browser Pro uses the ChatGPT subscription; API mode requires separate API access and billing. The registry's API token prices are short-context estimates; long-context and aggregate Pro work can cost more.
+- If GPT-6 or Pro is unavailable, report the actual selection failure. Never replace an explicitly requested GPT-6 Pro run with an older or weaker model.
 
 ## GPT-5.6 Model Selection
 
@@ -70,13 +80,13 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
   - `node "<skill-folder>\\scripts\\run-oracle.mjs" --dry-run summary -p "<task>" --file "src/**"`
 
 - Browser run:
-  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro -p "<task>" --file "src/**"`
+  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-6-astra-pro -p "<task>" --file "src/**"`
 
-- GPT-5.6 API run (requires API access):
-  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine api --model gpt-5.6-sol-pro -p "<task>" --file "src/**"`
+- GPT-6 Pro API run (requires API access):
+  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine api --model gpt-6-astra-pro -p "<task>" --file "src/**"`
 
 - Force real uploaded attachments instead of inline text:
-  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-5.6-sol-pro --browser-attachments always -p "<task>" --file "path/to/file.txt"`
+  - `node "<skill-folder>\\scripts\\run-oracle.mjs" --engine browser --model gpt-6-astra-pro --browser-attachments always -p "<task>" --file "path/to/file.txt"`
 
 - Reattach:
   - `node "<skill-folder>\\scripts\\run-oracle.mjs" session <id> --render`

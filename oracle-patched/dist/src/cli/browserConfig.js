@@ -13,6 +13,8 @@ const DEFAULT_CHROME_PROFILE = "Default";
 // Ordered array: most specific models first to ensure correct selection.
 // The browser label is passed to the model picker which fuzzy-matches against ChatGPT's UI.
 const BROWSER_MODEL_LABELS = [
+    ["gpt-6-astra", "GPT-6 Astra"],
+    ["gpt-6", "GPT-6 Astra"],
     // Most specific first (e.g., "gpt-5.2-thinking" before "gpt-5.2")
     ["gpt-5.6-sol", "GPT-5.6 Sol"],
     ["gpt-5.6-terra", "GPT-5.6 Terra"],
@@ -35,6 +37,9 @@ const BROWSER_MODEL_LABELS = [
 ];
 export function normalizeChatGptModelForBrowser(model) {
     const normalized = model.toLowerCase();
+    if (/^gpt-6(?:-astra)?(?:-pro)?$/.test(normalized)) {
+        return "gpt-6-astra";
+    }
     if (!normalized.startsWith("gpt-") || normalized.includes("codex")) {
         return model;
     }
@@ -71,12 +76,19 @@ export function defaultBrowserThinkingTimeForModel(model) {
         .replace(/[^a-z0-9]+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-    if (normalized.includes("5 6") && normalized.split(" ").includes("pro")) {
+    if ((normalized.includes("5 6") || /^gpt 6(?: |$)/.test(normalized)) && normalized.split(" ").includes("pro")) {
         return "pro";
     }
     return undefined;
 }
 export async function buildBrowserConfig(options) {
+    const requiredThinkingTime = defaultBrowserThinkingTimeForModel(options.model);
+    if (requiredThinkingTime === "pro" && options.browserThinkingTime && options.browserThinkingTime !== "pro") {
+        throw new Error(options.model + " requires Pro; refusing a lower --browser-thinking-time.");
+    }
+    if (/^gpt-6(?:-|$)/i.test(options.model) && options.browserModelStrategy === "current") {
+        throw new Error("GPT-6 requires verified model selection; --browser-model-strategy current is not supported.");
+    }
     const desiredModelOverride = options.browserModelLabel?.trim();
     const normalizedOverride = desiredModelOverride?.toLowerCase() ?? "";
     const baseModel = options.model.toLowerCase();

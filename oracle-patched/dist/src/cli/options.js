@@ -171,6 +171,12 @@ function isGeminiDeepThinkAlias(normalized) {
         normalized.includes("deep_think") ||
         normalized.includes("deepthink"));
 }
+function resolveGpt6Alias(normalized) {
+    if (/^(?:gpt[\s_-]*)?6(?:[\s_-]+astra)?(?:[\s_-]+pro)?$/i.test(normalized)) {
+        return /(?:^|[\s_-])pro$/i.test(normalized) ? "gpt-6-astra-pro" : "gpt-6-astra";
+    }
+    return null;
+}
 function resolveGpt56Alias(normalized) {
     if (!normalized.includes("5.6") && !normalized.includes("5_6")) {
         return null;
@@ -203,6 +209,10 @@ export function resolveApiModel(modelValue) {
     }
     if (normalized.includes("claude") && normalized.includes("opus")) {
         return "claude-4.1-opus";
+    }
+    const gpt6Model = resolveGpt6Alias(normalized);
+    if (gpt6Model) {
+        return gpt6Model;
     }
     const gpt56Model = resolveGpt56Alias(normalized);
     if (gpt56Model) {
@@ -290,6 +300,10 @@ export function inferModelFromLabel(modelValue) {
             return "gemini-3.1-pro";
         }
         return "gemini-3-pro";
+    }
+    const gpt6Model = resolveGpt6Alias(normalized);
+    if (gpt6Model) {
+        return gpt6Model;
     }
     const gpt56Model = resolveGpt56Alias(normalized);
     if (gpt56Model) {

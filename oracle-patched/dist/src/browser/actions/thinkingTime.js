@@ -481,6 +481,12 @@ function buildThinkingTimeExpression(level, desiredModel) {
       dispatchClickSequence(modelBtn);
       await sleep(INITIAL_WAIT_MS);
     }
+    const advancedView = document.querySelector('[data-testid="composer-model-picker-slider-advanced-view"][data-active="true"]');
+    const modelViewToggle = advancedView?.closest('[data-testid="composer-intelligence-picker-content"]')?.querySelector('[role="menuitem"][aria-expanded="true"]');
+    if (modelViewToggle) {
+      dispatchClickSequence(modelViewToggle);
+      await sleep(STEP_WAIT_MS);
+    }
 
     const getReasoningSurfaces = () => {
       const surfaces = visiblePickerSurfaces();
@@ -532,6 +538,7 @@ function buildThinkingTimeExpression(level, desiredModel) {
     const SLIDER_SELECTOR = [
       '[role="slider"]',
       'input[type="range"]',
+      '[data-testid="composer-model-picker-slider-simple-view"] [aria-label="성능"]',
       '[data-testid="composer-model-picker-slider-simple-view"] [aria-label="Power" i]',
     ].join(', ');
     const findReasoningSlider = () => {
@@ -540,7 +547,7 @@ function buildThinkingTimeExpression(level, desiredModel) {
         Array.from(surface.querySelectorAll(SLIDER_SELECTOR))
       ))).filter(hasStableBox);
       const powerControl = scoped.find((slider) =>
-        normalize(slider.getAttribute('aria-label') ?? '') === 'power' &&
+        ['power', '성능'].includes(normalize(slider.getAttribute('aria-label') ?? '')) &&
         Boolean(slider.closest('[data-testid="composer-model-picker-slider-simple-view"]'))
       );
       if (powerControl) return { slider: powerControl, surfaces };
@@ -566,7 +573,8 @@ function buildThinkingTimeExpression(level, desiredModel) {
       return normalize(explicit + ' ' + (simpleView?.textContent ?? ''));
     };
     const sliderHasFivePositions = (slider) =>
-      /(?:^|\\s)[1-5]\\s+of\\s+5(?:\\s|$)/.test(sliderValueText(slider));
+      /(?:^|\\s)[1-5]\\s+of\\s+5(?:\\s|$)/.test(sliderValueText(slider)) ||
+      /5개\\s*중\\s*[1-5]번째/.test(sliderValueText(slider));
     const sliderValueMatchesTarget = (slider) => {
       const valueText = sliderValueText(slider);
       if (
@@ -699,16 +707,21 @@ function buildThinkingTimeExpression(level, desiredModel) {
         return { status: 'level-unavailable', availableLevels };
       }
       const isPowerControl =
-        normalize(slider.getAttribute?.('aria-label') ?? '') === 'power' &&
+        ['power', '성능'].includes(normalize(slider.getAttribute?.('aria-label') ?? '')) &&
         sliderHasFivePositions(slider);
-      const attempted =
-        setNativeRangeToTarget(slider) ||
-        dispatchSliderKey(
-          slider,
-          TARGET_LEVEL === 'pro'
-            ? (isPowerControl ? 'ArrowRight' : 'End')
-            : 'Home'
-        );
+      let attempted = setNativeRangeToTarget(slider);
+      if (!attempted) {
+        const key = TARGET_LEVEL === 'pro'
+          ? (isPowerControl ? 'ArrowRight' : 'End')
+          : 'Home';
+        const steps = TARGET_LEVEL === 'pro' && isPowerControl ? 4 : 1;
+        for (let step = 0; step < steps; step += 1) {
+          attempted = dispatchSliderKey(slider, key);
+          if (!attempted) break;
+          await sleep(80);
+          if (sliderValueMatchesTarget(slider)) break;
+        }
+      }
       const nativeRange =
         typeof HTMLInputElement !== 'undefined' &&
         slider instanceof HTMLInputElement;

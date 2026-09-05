@@ -1,0 +1,3 @@
+verification_token: ORACLE_GPT6_PRO_UPLOAD_OK
+integers: 17, 29, 41
+This synthetic fixture contains no user data or secrets.

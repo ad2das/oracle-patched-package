@@ -21,7 +21,10 @@ export function resolveRunOptionsFromConfig({ prompt, files = [], model, models,
         .filter(Boolean);
     const cliModelArg = normalizeModelOption(model ?? userConfig?.model) || DEFAULT_MODEL;
     const apiModel = resolveApiModel(cliModelArg);
-    const browserModel = normalizeChatGptModelForBrowser(inferModelFromLabel(cliModelArg));
+    const inferredBrowserModel = inferModelFromLabel(cliModelArg);
+    const browserModel = inferredBrowserModel.startsWith("gpt-6-")
+        ? inferredBrowserModel
+        : normalizeChatGptModelForBrowser(inferredBrowserModel);
     const isCodex = apiModel.startsWith("gpt-5.1-codex");
     const isClaude = apiModel.startsWith("claude");
     const isGrok = apiModel.startsWith("grok");
