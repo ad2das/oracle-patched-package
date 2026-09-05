@@ -11,15 +11,28 @@ async function selectGpt6Model(buttonSelector, dispatchClickSequence, matchesMod
     const visible = node => Boolean(node && !node.closest('[inert], [aria-hidden="true"]') && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0);
     const selected = node => node?.getAttribute("aria-checked") === "true" || node?.getAttribute("data-state") === "checked";
     const text = node => (node?.textContent ?? "").trim();
-    const button = document.querySelector(buttonSelector);
-    if (!button) return { status: "button-missing" };
-    const picker = () => document.getElementById(button.getAttribute("aria-controls")) ?? document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+    // React replaces the composer pill when model/effort selection changes. Never
+    // retain the old element as evidence after clicking a model row.
+    const button = () => document.querySelector(buttonSelector);
+    if (!button()) return { status: "button-missing" };
+    const picker = () => document.getElementById(button()?.getAttribute("aria-controls")) ?? document.querySelector('[data-testid="composer-intelligence-picker-content"]');
     const modelRows = () => Array.from(picker()?.querySelectorAll('[role="menuitemradio"]') ?? []).filter(visible);
     const modelToggle = () => Array.from(picker()?.querySelectorAll('[role="menuitem"][aria-expanded]') ?? []).find(visible);
-    const observedLabel = () => {
-        const labels = [text(button), text(modelToggle()), ...modelRows().filter(selected).map(text)];
-        return labels.find(matchesModel) ?? "";
+    const nodeLabels = node => node && visible(node) ? [
+        text(node), node.getAttribute("aria-label"), node.getAttribute("title"),
+    ].filter(Boolean) : [];
+    const observedLabels = () => {
+        const current = button();
+        // In the split pill, the button says only "Extra High"/"Pro" and the
+        // numeric model badge is its sibling. Scope proof to this composer pill;
+        // a GPT-6 mention elsewhere in a conversation is not model evidence.
+        const composite = current?.closest(".__composer-pill-composite");
+        const badgeNodes = Array.from(composite?.querySelectorAll("span, svg, [aria-label], [title]") ?? []);
+        return [...nodeLabels(current), ...nodeLabels(composite),
+            ...badgeNodes.flatMap(nodeLabels), ...nodeLabels(modelToggle()),
+            ...modelRows().filter(selected).flatMap(nodeLabels)];
     };
+    const observedLabel = () => observedLabels().find(matchesModel) ?? "";
     const closeMenu = () => {
         document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
     };
@@ -28,8 +41,8 @@ async function selectGpt6Model(buttonSelector, dispatchClickSequence, matchesMod
         closeMenu();
         return { status: "already-selected", label };
     }
-    if (button.getAttribute("aria-expanded") !== "true") {
-        dispatchClickSequence(button);
+    if (button()?.getAttribute("aria-expanded") !== "true") {
+        dispatchClickSequence(button());
         await sleep(200);
     }
     const toggle = modelToggle();
@@ -61,7 +74,9 @@ async function selectGpt6Model(buttonSelector, dispatchClickSequence, matchesMod
         if (label) return { status: "switched", label };
         await sleep(100);
     }
-    return { status: "option-not-found", hint: { availableOptions: [...availableOptions, "Unverified selection: " + text(button)] } };
+    return { status: "option-not-found", hint: { availableOptions: [...availableOptions,
+        "Unverified selection: " + text(button()),
+        "Observed model labels: " + JSON.stringify(observedLabels())] } };
 }
 
 export function buildGpt6ModelSelectionExpression() {

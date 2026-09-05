@@ -6,6 +6,10 @@ This repository contains a patched copy of `@steipete/oracle` 0.12.1 under `orac
 
 The default target is `gpt-6-astra-pro`. `gpt-6-pro` and `GPT6 Pro` are equivalent aliases. Browser mode verifies the GPT-6 model badge and the separate Pro reasoning level before sending; it never treats a bare Pro or Latest label as model proof. English Power and Korean 성능 sliders are supported from every lower position.
 
+The selector also handles a split composer pill whose button contains only the effort label, and reacquires the button after React replaces it. Model evidence stays scoped to the current visible composer or selected picker row. Regression tests cover split text/accessibility labels, replaced buttons, hidden/unrelated badges and wrong generations. These fixture checks do not replace a live browser smoke test.
+
+The split-pill fix passed all 64 Node regression tests; both new failure fixtures reject the previous selector. A fresh live smoke test for this fix remains unverified because browser control timed out. The earlier successful live runs listed below predate this fix.
+
 ```powershell
 node scripts/run-oracle.mjs --engine browser --model gpt-6-pro -p "Review this implementation" --file "src/**"
 ```
@@ -27,6 +31,7 @@ Changes made:
 - The browser path supports ChatGPT's current five-position `Power` control, ARIA/range sliders, and legacy menu/radio controls. Pro aliases fail closed unless the selected state is verified, and report diagnostics without adding work to the successful path.
 - `read-live-chatgpt.mjs` records live ChatGPT state, and `run-oracle.mjs` blocks accidental duplicate browser submissions only when a current live read confirms ChatGPT is still generating.
 - The wrapper ignores stale, unrelated, terminal, or unreadable live-state/session-log evidence instead of blocking new browser submissions on old `generating=true` records.
+- Autoattach checks current Chrome ports first, then probes historical ports concurrently with a one-second deadline. Dry runs skip browser discovery and generation-port checks; real runs retain live-generation verification.
 - When a browser run fails and live verification proves the prompt was not submitted, the wrapper automatically invokes `submit-live-chatgpt.mjs` once on the same session. If that recovery creates a ChatGPT conversation URL, the wrapper exits successfully so callers recover that session instead of starting a duplicate.
 - Completed, errored, or cancelled sessions are excluded from that duplicate guard even if an older recovery state still says `generating=true`.
 - `scripts/read-live-chatgpt.mjs` can inspect an existing ChatGPT browser tab by session, persist recovery state, and show the answer tail after a CLI disconnect.

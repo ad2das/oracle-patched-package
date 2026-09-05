@@ -10,6 +10,11 @@ import {
   sessionPrompt,
 } from "./run-oracle-session-match.mjs";
 import { recoverLocalCompletedTranscript } from "./run-oracle-local-transcript.mjs";
+import {
+  DEFAULT_PORT_PROBE_TIMEOUT_MS,
+  normalizePort,
+  probeLocalPortsSync,
+} from "./run-oracle-port-probe.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptDir);
@@ -52,6 +57,10 @@ function isBrowserRun(args) {
   const first = args.find((arg) => !arg.startsWith("-"));
   if (first === "session" || first === "status" || first === "serve" || first === "docs") return false;
   return argValue(args, "--engine") === "browser" || argValue(args, "-e") === "browser";
+}
+
+function isDryRun(args) {
+  return hasArg(args, "--dry-run");
 }
 
 function isSessionRender(args) {
@@ -465,21 +474,11 @@ function isProcessAlive(pid) {
 }
 
 function isLocalPortOpen(port) {
-  const numericPort = Number(port);
-  if (!Number.isInteger(numericPort) || numericPort <= 0) return false;
-  const probe = spawnSync(
-    process.platform === "win32" ? "powershell.exe" : "sh",
-    process.platform === "win32"
-      ? ["-NoProfile", "-Command", `$client = New-Object Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1', ${numericPort}); $client.Close(); exit 0 } catch { exit 1 }`]
-      : ["-c", `nc -z 127.0.0.1 ${numericPort}`],
-    { stdio: "ignore" },
-  );
-  return probe.status === 0;
-}
-
-function normalizePort(value) {
-  const port = Number(String(value ?? "").trim());
-  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  const numericPort = normalizePort(port);
+  if (numericPort === null) return false;
+  return probeLocalPortsSync([numericPort], {
+    timeoutMs: DEFAULT_PORT_PROBE_TIMEOUT_MS,
+  }) === numericPort;
 }
 
 function addCandidatePort(ports, value) {
@@ -547,14 +546,18 @@ function browserConnectionPinned(args) {
 
 function discoverAttachableOracleChromePort() {
   const oracleHome = process.env.ORACLE_HOME_DIR || join(homedir(), ".oracle");
-  const ports = [
-    ...chromeProcessDebugPorts(),
-    ...sessionCandidateDebugPorts(oracleHome),
-  ];
-  for (const port of [...new Set(ports)]) {
-    if (isLocalPortOpen(port)) return port;
-  }
-  return null;
+  // Process inspection is the authoritative live-browser signal. Probe those
+  // ports first and only touch session history when no current Chrome port is
+  // reachable. The history probe runs concurrently with one hard deadline,
+  // so dead ports cannot add a TCP timeout per old session.
+  const processPorts = chromeProcessDebugPorts();
+  const liveProcessPort = probeLocalPortsSync(processPorts, {
+    timeoutMs: DEFAULT_PORT_PROBE_TIMEOUT_MS,
+  });
+  if (liveProcessPort !== null) return liveProcessPort;
+  return probeLocalPortsSync(sessionCandidateDebugPorts(oracleHome), {
+    timeoutMs: DEFAULT_PORT_PROBE_TIMEOUT_MS,
+  });
 }
 
 function attachRunningArgs(args, port) {
@@ -573,6 +576,7 @@ function attachRunningArgs(args, port) {
 
 function maybeAutoAttachBrowserRun(args) {
   if (!isBrowserRun(args)) return args;
+  if (isDryRun(args)) return args;
   if (process.env.ORACLE_DISABLE_AUTO_ATTACH === "1") return args;
   if (browserConnectionPinned(args)) return args;
   const port = discoverAttachableOracleChromePort();
@@ -794,6 +798,7 @@ if (cliArgs[0] === "status" || isBrowserRun(cliArgs)) {
 }
 if (
   isBrowserRun(cliArgs) &&
+  !isDryRun(cliArgs) &&
   !cliArgs.includes("--force") &&
   process.env.ORACLE_ALLOW_BROWSER_DUPLICATE !== "1"
 ) {

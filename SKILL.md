@@ -25,6 +25,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 
 - Default: `gpt-6-astra-pro`. `gpt-6-pro`, `GPT6 Pro`, and `GPT-6 Astra Pro` resolve to the same target, never GPT-5.5 Pro.
 - Browser: select GPT-6, then separately confirm the `Pro` reasoning level before submitting. A numeric `6` badge such as `6 Pro` is accepted as model evidence; bare `Pro` is not.
+- The composer may split the numeric model badge from an effort-only button (`Extra High` or `Pro`). Read the visible badge within that same composer pill and reacquire the button after selection; React can replace it. Never infer GPT-6 from an unrelated page label, hidden badge, or `Latest` alone.
 - The current picker can call GPT-6 `Latest` / `최신`. That row is only a navigation candidate: require the resulting GPT-6 badge. If Latest changes to a different generation, fail instead of silently following it.
 - English `Power` and Korean `성능` sliders are supported. Advance through the known five-position control until the UI explicitly confirms Pro; a locked slider or a highest level other than Pro fails closed.
 - Do not use `--browser-model-strategy current` or override a Pro alias with a lower `--browser-thinking-time`. Recovery submissions recheck both the requested model and Pro.
@@ -105,6 +106,7 @@ Do not use `npx -y @steipete/oracle` for this skill. The wrapper runs the patche
 - Pick a tight file set and avoid secrets.
 - Use `--browser-attachments always` when you need to prove real upload behavior.
 - Browser runs can take a long time; if a run detaches or times out, reattach to the stored session instead of re-running.
+- Dry runs do not discover browser connections. Real autoattach prefers current Chrome process ports and uses bounded concurrent probes for historical ports, so stale sessions cannot add a TCP timeout per port.
 - Do not treat `chrome-disconnected`, `Browser session ended`, `No live ChatGPT tab could be read`, or a session `error` status as proof that ChatGPT stopped generating or that no answer exists. If `read-live-chatgpt.mjs` has ever returned `generating=true` for the conversation, keep polling/recovering that same conversation until it returns `generating=false`, yields final answer text, or the user explicitly tells you to abandon it.
 - Do not retry a failed browser request merely because the CLI printed `ECONNREFUSED`, `Browser session ended`, `No live ChatGPT tab could be read`, or returned a non-zero exit. First verify the latest browser session with actual evidence: `promptSubmitted=true`, a `chatgpt.com/c/...` URL, a live DOM read containing the submitted prompt/assistant response, or explicit `not-submitted` metadata. Retry only after this verification and the wrapper's automatic live-submit recovery both prove the prompt was not submitted. The wrapper prints a post-failure `submitted`, `not_submitted`, or `unknown` verification result for browser failures.
 - If a session log already shows ChatGPT response activity, treat the request as submitted even if runtime metadata still says `promptSubmitted=false`; recover or poll that session instead of relaunching.

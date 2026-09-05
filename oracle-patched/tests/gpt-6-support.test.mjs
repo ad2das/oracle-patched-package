@@ -147,6 +147,71 @@ test("unavailable GPT-6 and future Latest model changes fail closed", async () =
     }
 });
 
+function splitModelFixture({ badge = "6", hiddenBadge = false, replaceButton = false,
+    badgeAttribute = null, outsideBadge = false } = {}) {
+    let open = false;
+    let advanced = false;
+    let switched = false;
+    const composite = new UiNode();
+    const badgeNode = new UiNode(badgeAttribute ? "" : badge,
+        badgeAttribute ? { [badgeAttribute]: badge } : {});
+    badgeNode.getBoundingClientRect = () => ({ width: hiddenBadge ? 0 : 20, height: 20 });
+    composite.querySelectorAll = () => outsideBadge ? [] : [badgeNode];
+    const makeButton = label => {
+        const node = new UiNode(label, { "aria-controls": "picker" });
+        node.getAttribute = name => name === "aria-expanded" ? String(open) : node.attributes[name] ?? null;
+        node.closest = selector => selector === ".__composer-pill-composite" && switched && !replaceButton ? composite : null;
+        node.addEventListener("click", () => { open = !open; });
+        return node;
+    };
+    let button = makeButton("Extra High");
+    const toggle = new UiNode("Latest");
+    toggle.getAttribute = name => name === "aria-expanded" ? String(advanced) : null;
+    toggle.addEventListener("click", () => { advanced = !advanced; });
+    const row = new UiNode("Latest");
+    row.closest = () => open && advanced ? null : new UiNode();
+    row.addEventListener("click", () => {
+        switched = true;
+        if (replaceButton) button = makeButton(badge);
+        open = false;
+    });
+    const surface = new UiNode();
+    surface.querySelectorAll = selector => selector.includes("menuitemradio") ? [row] : [toggle];
+    const document = {
+        getElementById: () => open ? surface : null,
+        querySelector: selector => selector === MODEL_BUTTON_SELECTOR ? button : null,
+        // An unrelated page badge is deliberately outside the selected composer.
+        querySelectorAll: () => outsideBadge ? [badgeNode] : [],
+        dispatchEvent: event => { if (event.key === "Escape") open = false; },
+    };
+    return domContext(document);
+}
+
+test("split composer verifies sibling model badge when button contains only effort", async () => {
+    for (const badgeAttribute of [null, "aria-label", "title"]) {
+        const result = await runInNewContext(buildModelSelectionExpressionForTest("GPT-6 Astra"),
+            splitModelFixture({ badgeAttribute }));
+        assert.equal(result.status, "switched");
+        assert.equal(result.label, "6");
+    }
+});
+
+test("model confirmation reacquires the button after React replaces it", async () => {
+    const result = await runInNewContext(buildModelSelectionExpressionForTest("GPT-6 Astra"),
+        splitModelFixture({ replaceButton: true, badge: "6 Pro" }));
+    assert.equal(result.status, "switched");
+    assert.equal(result.label, "6 Pro");
+});
+
+test("hidden, unrelated, bare-effort and wrong-generation badges are not model proof", async () => {
+    for (const options of [{ hiddenBadge: true }, { outsideBadge: true },
+        { badge: "Pro" }, { badge: "7" }, { badge: "GPT-5.6 Sol" }]) {
+        const result = await runInNewContext(buildModelSelectionExpressionForTest("GPT-6 Astra"),
+            splitModelFixture(options));
+        assert.equal(result.status, "option-not-found", JSON.stringify(options));
+    }
+});
+
 function sliderFixture({ locale = "ko", initial = 0, count = 5, locked = false, maximumLabel = "Pro" } = {}) {
     let position = initial;
     const keys = [];
